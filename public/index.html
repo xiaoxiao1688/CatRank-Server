@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>猫咪冲刺食堂</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <header class="hero">
+        <div class="hero-copy">
+          <p class="eyebrow">FULL STACK CAT ARCADE</p>
+          <h1>猫咪冲刺食堂</h1>
+          <p class="hero-text">
+            控制小猫在夜市屋顶接住小鱼和罐头，避开坏掉的黑炸弹。每局 45 秒，3 条命，分数会提交到后端排行榜。
+          </p>
+          <div class="hero-actions">
+            <button id="start-button" class="primary-button">开始游戏</button>
+            <div class="controls-card">
+              <span>移动：A / D 或 ← / →</span>
+              <span>重新开始：空格</span>
+            </div>
+          </div>
+        </div>
+
+        <aside class="status-panel">
+          <div class="stat">
+            <span class="stat-label">得分</span>
+            <strong id="score-value">0</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">生命</span>
+            <strong id="lives-value">3</strong>
+          </div>
+          <div class="stat">
+            <span class="stat-label">剩余时间</span>
+            <strong id="time-value">45s</strong>
+          </div>
+          <div class="stat highlight">
+            <span class="stat-label">状态</span>
+            <strong id="status-value">等待开始</strong>
+          </div>
+        </aside>
+      </header>
+
+      <main class="main-grid">
+        <section class="game-card">
+          <canvas id="game-canvas" width="900" height="540" aria-label="猫咪小游戏画布"></canvas>
+          <div class="canvas-overlay" id="canvas-overlay">
+            <div class="overlay-card">
+              <p class="overlay-tag">ROOFTOP SNACK RUSH</p>
+              <h2>让猫咪吃到更多鱼</h2>
+              <p id="overlay-text">点开始进入游戏，结束后会自动弹出昵称提交排行榜。</p>
+            </div>
+          </div>
+        </section>
+
+        <section class="leaderboard-card">
+          <div class="leaderboard-header">
+            <div>
+              <p class="eyebrow">SERVER LEADERBOARD</p>
+              <h2>今日喵榜</h2>
+            </div>
+            <button id="refresh-button" class="ghost-button">刷新</button>
+          </div>
+          <ol id="leaderboard-list" class="leaderboard-list"></ol>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="score-dialog" class="score-dialog">
+      <form method="dialog" id="score-form">
+        <p class="eyebrow">UPLOAD SCORE</p>
+        <h3>本局结束</h3>
+        <p id="final-score-text">你的得分：0</p>
+        <label for="player-name">输入猫咪代号</label>
+        <input id="player-name" name="playerName" maxlength="20" placeholder="例如：小鱼队长" />
+        <div class="dialog-actions">
+          <button type="submit" class="primary-button">提交分数</button>
+          <button type="button" id="skip-submit" class="ghost-button">跳过</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./app.js" defer></script>
+  </body>
+</html>
