@@ -30,6 +30,9 @@ body {
     radial-gradient(circle at 80% 20%, rgba(255, 209, 102, 0.28), transparent 24%),
     linear-gradient(180deg, var(--bg-top), var(--bg-bottom));
   overflow-x: hidden;
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 body::before,
@@ -157,6 +160,7 @@ h3 {
     transform 150ms ease,
     background-color 150ms ease,
     opacity 150ms ease;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .primary-button {
@@ -173,6 +177,11 @@ h3 {
 .primary-button:hover,
 .ghost-button:hover {
   transform: translateY(-2px);
+}
+
+.primary-button:active,
+.ghost-button:active {
+  transform: translateY(0);
 }
 
 .status-panel {
@@ -226,6 +235,7 @@ h3 {
   height: auto;
   border-radius: 22px;
   background: linear-gradient(180deg, #243d69 0%, #355a91 45%, #1d2940 100%);
+  touch-action: none;
 }
 
 .canvas-overlay {
@@ -262,6 +272,119 @@ h3 {
 .overlay-card p:last-child {
   margin-bottom: 0;
   line-height: 1.5;
+}
+
+.skill-bar {
+  position: absolute;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 12px;
+  z-index: 10;
+}
+
+.skill-button {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border-radius: 16px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  overflow: hidden;
+  -webkit-tap-highlight-color: transparent;
+  transition: all 150ms ease;
+}
+
+.skill-button:hover:not(.on-cooldown) {
+  border-color: var(--accent);
+  transform: scale(1.05);
+}
+
+.skill-button:active:not(.on-cooldown) {
+  transform: scale(0.95);
+}
+
+.skill-button.on-cooldown {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.skill-icon {
+  font-size: 24px;
+  line-height: 1;
+}
+
+.skill-label {
+  font-size: 10px;
+  margin-top: 2px;
+  color: rgba(255, 255, 255, 0.8);
+}
+
+.skill-cooldown {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(0, 0, 0, 0.7);
+  transition: height 100ms linear;
+  pointer-events: none;
+}
+
+.power-up-status {
+  position: absolute;
+  top: 24px;
+  right: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  z-index: 10;
+}
+
+.active-power-up {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 209, 102, 0.5);
+  font-size: 14px;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.active-power-up span:first-child {
+  font-size: 18px;
+}
+
+.touch-controls {
+  position: absolute;
+  inset: 16px;
+  display: none;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.touch-zone {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 50%;
+  pointer-events: auto;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.touch-left {
+  left: 0;
+}
+
+.touch-right {
+  right: 0;
 }
 
 .leaderboard-card {
@@ -323,6 +446,33 @@ h3 {
   font-weight: 700;
 }
 
+.power-up-info {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+
+.power-up-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.power-up-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 0.85rem;
+}
+
+.power-up-icon {
+  font-size: 1.2rem;
+}
+
 .score-dialog {
   width: min(92vw, 420px);
   border: 0;
@@ -356,6 +506,11 @@ h3 {
   font: inherit;
 }
 
+.score-dialog input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 .dialog-actions {
   display: flex;
   gap: 10px;
@@ -382,6 +537,15 @@ h3 {
   }
 }
 
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.8;
+  }
+}
+
 @media (max-width: 960px) {
   .hero,
   .main-grid {
@@ -394,6 +558,10 @@ h3 {
 
   .stat.highlight {
     grid-column: auto;
+  }
+  
+  .touch-controls {
+    display: block;
   }
 }
 
@@ -423,5 +591,38 @@ h3 {
   .leaderboard-header {
     flex-direction: column;
     align-items: flex-start;
+  }
+  
+  .skill-bar {
+    bottom: 16px;
+  }
+  
+  .skill-button {
+    width: 56px;
+    height: 56px;
+  }
+  
+  .skill-icon {
+    font-size: 20px;
+  }
+  
+  .skill-label {
+    font-size: 9px;
+  }
+  
+  .power-up-status {
+    top: 16px;
+    right: 16px;
+  }
+  
+  .active-power-up {
+    padding: 6px 10px;
+    font-size: 12px;
+  }
+}
+
+@media (pointer: coarse) {
+  .touch-controls {
+    display: block;
   }
 }

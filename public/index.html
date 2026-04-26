@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
     <title>猫咪冲刺食堂</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
@@ -13,13 +13,15 @@
           <p class="eyebrow">FULL STACK CAT ARCADE</p>
           <h1>猫咪冲刺食堂</h1>
           <p class="hero-text">
-            控制小猫在夜市屋顶接住小鱼和罐头，避开坏掉的黑炸弹。每局 45 秒，3 条命，分数会提交到后端排行榜。
+            控制小猫在夜市屋顶接住小鱼和罐头，避开坏掉的黑炸弹。收集特殊道具获得强力技能，支持桌面键盘和手机触控操作。
           </p>
           <div class="hero-actions">
             <button id="start-button" class="primary-button">开始游戏</button>
             <div class="controls-card">
-              <span>移动：A / D 或 ← / →</span>
-              <span>重新开始：空格</span>
+              <span>桌面：A/D 或 ←/→ 移动</span>
+              <span>技能：Q键冲刺 / E键清屏</span>
+              <span>手机：左右滑动控制</span>
+              <span>重新开始：空格键</span>
             </div>
           </div>
         </div>
@@ -34,8 +36,12 @@
             <strong id="lives-value">3</strong>
           </div>
           <div class="stat">
+            <span class="stat-label">关卡</span>
+            <strong id="level-value">1</strong>
+          </div>
+          <div class="stat">
             <span class="stat-label">剩余时间</span>
-            <strong id="time-value">45s</strong>
+            <strong id="time-value">60s</strong>
           </div>
           <div class="stat highlight">
             <span class="stat-label">状态</span>
@@ -51,8 +57,28 @@
             <div class="overlay-card">
               <p class="overlay-tag">ROOFTOP SNACK RUSH</p>
               <h2>让猫咪吃到更多鱼</h2>
-              <p id="overlay-text">点开始进入游戏，结束后会自动弹出昵称提交排行榜。</p>
+              <p id="overlay-text">点击开始进入游戏，收集特殊道具获得护盾、双倍分数、磁铁、时间减缓等能力。使用技能键释放冲刺和清屏！</p>
             </div>
+          </div>
+          
+          <div class="skill-bar" id="skill-bar">
+            <button class="skill-button" id="skill-dash" aria-label="冲刺技能">
+              <span class="skill-icon">💨</span>
+              <span class="skill-label">冲刺</span>
+              <div class="skill-cooldown" id="skill-dash-cooldown"></div>
+            </button>
+            <button class="skill-button" id="skill-clear" aria-label="清屏技能">
+              <span class="skill-icon">💥</span>
+              <span class="skill-label">清屏</span>
+              <div class="skill-cooldown" id="skill-clear-cooldown"></div>
+            </button>
+          </div>
+          
+          <div class="power-up-status" id="power-up-status"></div>
+          
+          <div class="touch-controls" id="touch-controls">
+            <div class="touch-zone touch-left" id="touch-left"></div>
+            <div class="touch-zone touch-right" id="touch-right"></div>
           </div>
         </section>
 
@@ -65,6 +91,28 @@
             <button id="refresh-button" class="ghost-button">刷新</button>
           </div>
           <ol id="leaderboard-list" class="leaderboard-list"></ol>
+          
+          <div class="power-up-info">
+            <p class="eyebrow">POWER UPS</p>
+            <div class="power-up-grid">
+              <div class="power-up-item">
+                <span class="power-up-icon">🛡️</span>
+                <span>护盾 - 免疫伤害</span>
+              </div>
+              <div class="power-up-item">
+                <span class="power-up-icon">✨</span>
+                <span>双倍 - 分数翻倍</span>
+              </div>
+              <div class="power-up-item">
+                <span class="power-up-icon">🧲</span>
+                <span>磁铁 - 自动吸引</span>
+              </div>
+              <div class="power-up-item">
+                <span class="power-up-icon">⏰</span>
+                <span>减缓 - 时间变慢</span>
+              </div>
+            </div>
+          </div>
         </section>
       </main>
     </div>
@@ -75,7 +123,7 @@
         <h3>本局结束</h3>
         <p id="final-score-text">你的得分：0</p>
         <label for="player-name">输入猫咪代号</label>
-        <input id="player-name" name="playerName" maxlength="20" placeholder="例如：小鱼队长" />
+        <input id="player-name" name="playerName" maxlength="20" placeholder="例如：小鱼队长" autocomplete="off" />
         <div class="dialog-actions">
           <button type="submit" class="primary-button">提交分数</button>
           <button type="button" id="skip-submit" class="ghost-button">跳过</button>
