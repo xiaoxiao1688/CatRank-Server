@@ -13,6 +13,9 @@ const LOCK_FILE = path.join(DATA_DIR, ".write.lock");
 const MAX_NAME_LENGTH = 20;
 const LOCK_TIMEOUT = 5000;
 const LOCK_WAIT_INTERVAL = 100;
+const LOCK_STALE_THRESHOLD = 30000;
+const SESSION_TIMEOUT = 2 * 60 * 60 * 1000;
+const SESSION_CLEANUP_INTERVAL = 10 * 60 * 1000;
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -35,33 +38,74 @@ const GAME_CONFIG = {
   bombPenalty: 1,
   baseSpawnInterval: 800,
   minSpawnInterval: 300,
-  maxItemsPerSecond: 4
+  maxItemsPerSecond: 4,
+  maxComboMultiplier: 2.0,
+  doubleScoreDuration: 8000
 };
 
 const activeSessions = new Map();
 
+function logInfo(message) {
+  const timestamp = new Date().toISOString();
+  console.log(`[${timestamp}] ${message}`);
+}
+
+function logWarn(message) {
+  const timestamp = new Date().toISOString();
+  console.warn(`[${timestamp}] ⚠️  ${message}`);
+}
+
+function logError(message, error) {
+  const timestamp = new Date().toISOString();
+  console.error(`[${timestamp}] ❌ ${message}`, error || "");
+}
+
 async function acquireLock() {
   const startTime = Date.now();
-  while (Date.now() - startTime < LOCK_TIMEOUT) {
+  let lockAcquired = false;
+
+  while (Date.now() - startTime < LOCK_TIMEOUT && !lockAcquired) {
     try {
       await fsp.access(LOCK_FILE, fs.constants.F_OK);
+      
+      try {
+        const lockContent = await fsp.readFile(LOCK_FILE, "utf8");
+        const lockTime = Number(lockContent.trim());
+        const now = Date.now();
+        
+        if (!Number.isNaN(lockTime) && (now - lockTime) > LOCK_STALE_THRESHOLD) {
+          logWarn(`检测到死锁文件，强制清理（锁时间: ${new Date(lockTime).toISOString()}）`);
+          await fsp.unlink(LOCK_FILE);
+          continue;
+        }
+      } catch (readError) {
+        try {
+          await fsp.unlink(LOCK_FILE);
+          continue;
+        } catch {
+        }
+      }
+      
       await new Promise(resolve => setTimeout(resolve, LOCK_WAIT_INTERVAL));
     } catch {
       try {
-        await fsp.writeFile(LOCK_FILE, `${Date.now()}\n`, "utf8");
-        return true;
-      } catch {
+        const now = Date.now();
+        await fsp.writeFile(LOCK_FILE, `${now}\n`, "utf8");
+        lockAcquired = true;
+      } catch (writeError) {
         await new Promise(resolve => setTimeout(resolve, LOCK_WAIT_INTERVAL));
       }
     }
   }
-  return false;
+
+  return lockAcquired;
 }
 
 async function releaseLock() {
   try {
     await fsp.unlink(LOCK_FILE);
-  } catch {
+  } catch (error) {
+    logWarn("释放锁文件失败:", error);
   }
 }
 
@@ -72,6 +116,20 @@ async function ensureStorage() {
     await fsp.access(SCORES_FILE, fs.constants.F_OK);
   } catch {
     await fsp.writeFile(SCORES_FILE, "[]\n", "utf8");
+    logInfo("创建新的分数存储文件");
+  }
+
+  try {
+    await fsp.access(LOCK_FILE, fs.constants.F_OK);
+    const lockContent = await fsp.readFile(LOCK_FILE, "utf8");
+    const lockTime = Number(lockContent.trim());
+    const now = Date.now();
+    
+    if (Number.isNaN(lockTime) || (now - lockTime) > LOCK_STALE_THRESHOLD) {
+      logWarn("启动时检测到残留锁文件，已清理");
+      await fsp.unlink(LOCK_FILE);
+    }
+  } catch {
   }
 }
 
@@ -80,7 +138,8 @@ async function readScores() {
     const raw = await fsp.readFile(SCORES_FILE, "utf8");
     const parsed = JSON.parse(raw);
     return Array.isArray(parsed) ? parsed : [];
-  } catch {
+  } catch (error) {
+    logError("读取分数文件失败", error);
     return [];
   }
 }
@@ -88,14 +147,43 @@ async function readScores() {
 async function writeScores(scores) {
   const lockAcquired = await acquireLock();
   if (!lockAcquired) {
+    logError("无法获取文件锁，写入失败");
     throw new Error("Failed to acquire lock for writing scores");
   }
   
   try {
-    await fsp.writeFile(SCORES_FILE, `${JSON.stringify(scores, null, 2)}\n`, "utf8");
+    const tempFile = `${SCORES_FILE}.tmp.${Date.now()}`;
+    await fsp.writeFile(tempFile, `${JSON.stringify(scores, null, 2)}\n`, "utf8");
+    await fsp.rename(tempFile, SCORES_FILE);
+    logInfo(`分数已保存，共 ${scores.length} 条记录`);
   } finally {
     await releaseLock();
   }
+}
+
+function cleanExpiredSessions() {
+  const now = Date.now();
+  let cleanedCount = 0;
+
+  for (const [sessionId, session] of activeSessions.entries()) {
+    const sessionAge = now - session.createdAt;
+    if (sessionAge > SESSION_TIMEOUT) {
+      activeSessions.delete(sessionId);
+      cleanedCount++;
+    }
+  }
+
+  if (cleanedCount > 0) {
+    logInfo(`清理了 ${cleanedCount} 个过期会话`);
+  }
+}
+
+function startSessionCleanup() {
+  setInterval(() => {
+    cleanExpiredSessions();
+  }, SESSION_CLEANUP_INTERVAL);
+  
+  logInfo(`会话清理任务已启动，间隔 ${SESSION_CLEANUP_INTERVAL / 1000} 秒`);
 }
 
 function normalizeName(value) {
@@ -116,39 +204,63 @@ function normalizeScore(value) {
   return Math.max(0, Math.round(numeric));
 }
 
-function validateScore(score, sessionData) {
-  if (!sessionData) {
-    return { valid: false, reason: "No active session" };
-  }
-
-  const maxFishScore = GAME_CONFIG.fishScore;
-  const maxGoldenScore = GAME_CONFIG.goldenFishScore;
-  
+function calculateMaxPossibleScore() {
   const duration = GAME_CONFIG.durationSeconds;
   const maxItems = duration * GAME_CONFIG.maxItemsPerSecond;
   
-  const maxPossibleScore = maxItems * maxGoldenScore;
-  const minReasonableScore = 0;
+  const baseMaxPerItem = GAME_CONFIG.goldenFishScore;
+  const comboMultiplier = GAME_CONFIG.maxComboMultiplier;
+  const doubleScoreMultiplier = 2;
+  
+  return Math.floor(maxItems * baseMaxPerItem * comboMultiplier * doubleScoreMultiplier);
+}
 
+function validateScore(score, sessionData) {
+  const maxPossibleScore = calculateMaxPossibleScore();
+  
   if (score > maxPossibleScore) {
-    return { valid: false, reason: "Score exceeds maximum possible" };
+    return { 
+      valid: false, 
+      reason: `分数超过理论最大值 (${score} > ${maxPossibleScore})` 
+    };
   }
 
-  if (score < minReasonableScore) {
-    return { valid: false, reason: "Score is negative" };
+  if (score < 0) {
+    return { valid: false, reason: "分数为负数" };
+  }
+
+  if (!sessionData) {
+    return { 
+      valid: false, 
+      reason: "无活动会话",
+      allowSave: true
+    };
   }
 
   if (sessionData.itemsCaught) {
-    const calculatedScore = 
-      (sessionData.itemsCaught.fish || 0) * maxFishScore +
-      (sessionData.itemsCaught.golden || 0) * maxGoldenScore;
+    const baseScore = 
+      (sessionData.itemsCaught.fish || 0) * GAME_CONFIG.fishScore +
+      (sessionData.itemsCaught.golden || 0) * GAME_CONFIG.goldenFishScore;
     
-    if (Math.abs(score - calculatedScore) > 50) {
-      return { valid: false, reason: "Score mismatch with caught items" };
+    const tolerance = Math.max(100, baseScore * 0.5);
+    
+    if (score < 0) {
+      return { valid: false, reason: "分数为负数" };
+    }
+    
+    if (score > baseScore + tolerance + 1000) {
+      return { 
+        valid: false, 
+        reason: `分数与捕获物品不匹配 (上报: ${score}, 基础: ${baseScore}, 容差: ${tolerance})` 
+      };
     }
   }
 
-  return { valid: true, adjustedScore: score };
+  return { 
+    valid: true, 
+    adjustedScore: score,
+    reason: "校验通过"
+  };
 }
 
 function buildLeaderboard(scores) {
@@ -216,12 +328,16 @@ async function handleApi(req, res, url) {
     activeSessions.set(sessionId, {
       createdAt: Date.now(),
       itemsCaught: { fish: 0, golden: 0, bomb: 0 },
-      powerUpsUsed: 0
+      powerUpsUsed: 0,
+      clientStartTime: null
     });
+
+    logInfo(`创建新会话: ${sessionId}`);
 
     return sendJson(res, 200, {
       ...GAME_CONFIG,
       sessionId,
+      maxPossibleScore: calculateMaxPossibleScore(),
       powerUps: {
         shield: { name: "护盾", duration: 5000, icon: "🛡️" },
         doubleScore: { name: "双倍分数", duration: 8000, icon: "✨" },
@@ -242,7 +358,7 @@ async function handleApi(req, res, url) {
       const sessionId = body.sessionId;
       
       if (!sessionId || !activeSessions.has(sessionId)) {
-        return sendJson(res, 400, { ok: false, message: "Invalid session" });
+        return sendJson(res, 400, { ok: false, message: "无效的会话" });
       }
 
       const session = activeSessions.get(sessionId);
@@ -254,11 +370,14 @@ async function handleApi(req, res, url) {
         }
       } else if (body.updateType === "powerUpUsed") {
         session.powerUpsUsed++;
+      } else if (body.updateType === "gameStart") {
+        session.clientStartTime = Date.now();
       }
 
       return sendJson(res, 200, { ok: true });
     } catch (error) {
-      return sendJson(res, 400, { ok: false, message: "Invalid update payload" });
+      logError("会话更新失败", error);
+      return sendJson(res, 400, { ok: false, message: "无效的更新数据" });
     }
   }
 
@@ -274,36 +393,47 @@ async function handleApi(req, res, url) {
       const validation = validateScore(score, sessionData);
 
       if (!validation.valid) {
-        console.warn(`Score validation failed: ${validation.reason}, score: ${score}`);
+        logWarn(`分数校验失败: ${validation.reason}, 玩家: ${name}, 分数: ${score}`);
+      } else {
+        logInfo(`分数校验通过: 玩家 ${name}, 分数 ${score}`);
       }
 
-      const finalScore = validation.valid ? validation.adjustedScore : Math.min(score, 500);
+      const finalScore = score;
 
       const scores = await readScores();
       scores.push({
         name,
         score: finalScore,
         createdAt: new Date().toISOString(),
-        validated: validation.valid
+        validated: validation.valid,
+        validationReason: validation.reason,
+        sessionStats: sessionData ? {
+          fish: sessionData.itemsCaught.fish,
+          golden: sessionData.itemsCaught.golden,
+          bomb: sessionData.itemsCaught.bomb,
+          powerUpsUsed: sessionData.powerUpsUsed
+        } : null
       });
 
       await writeScores(scores);
 
       if (sessionId) {
         activeSessions.delete(sessionId);
+        logInfo(`会话已结束: ${sessionId}`);
       }
 
       return sendJson(res, 201, {
         ok: true,
         score: finalScore,
         validated: validation.valid,
+        validationReason: validation.reason,
         leaderboard: buildLeaderboard(scores)
       });
     } catch (error) {
-      console.error("Score submission error:", error);
+      logError("分数提交失败", error);
       return sendJson(res, 400, {
         ok: false,
-        message: "Invalid score payload"
+        message: "无效的分数数据"
       });
     }
   }
@@ -343,6 +473,7 @@ async function serveStatic(req, res, url) {
 
 async function createServer() {
   await ensureStorage();
+  startSessionCleanup();
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || `${HOST}:${PORT}`}`);
@@ -357,16 +488,18 @@ async function createServer() {
 
       await serveStatic(req, res, url);
     } catch (error) {
-      console.error(error);
+      logError("请求处理失败", error);
       sendJson(res, 500, {
         ok: false,
-        message: "Internal server error"
+        message: "服务器内部错误"
       });
     }
   });
 
   server.listen(PORT, HOST, () => {
-    console.log(`🐱 猫咪冲刺食堂运行在 http://${HOST}:${PORT}`);
+    logInfo(`🐱 猫咪冲刺食堂运行在 http://${HOST}:${PORT}`);
+    logInfo(`📊 最大可能分数: ${calculateMaxPossibleScore()}`);
+    logInfo(`⏱️  会话超时: ${SESSION_TIMEOUT / 1000} 秒`);
   });
 }
 

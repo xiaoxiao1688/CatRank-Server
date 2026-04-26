@@ -84,7 +84,9 @@
     level: 1,
     elapsedAccumulator: 0,
     spawnAccumulator: 0,
-    lastTime: 0,
+    lastFrameTime: 0,
+    gameStartTime: 0,
+    lastSecondTime: 0,
     animationId: 0,
     submittedScore: false,
     keys: { left: false, right: false },
@@ -228,7 +230,9 @@
     GAME.level = 1;
     GAME.elapsedAccumulator = 0;
     GAME.spawnAccumulator = 0;
-    GAME.lastTime = 0;
+    GAME.lastFrameTime = 0;
+    GAME.gameStartTime = 0;
+    GAME.lastSecondTime = 0;
     GAME.submittedScore = false;
     GAME.state = GAME_STATE.IDLE;
     GAME.combo = 0;
@@ -258,7 +262,13 @@
     GAME.state = GAME_STATE.PLAYING;
     overlay.classList.add("hidden");
     setStatus("游戏中");
-    GAME.lastTime = performance.now();
+    
+    const now = performance.now();
+    GAME.lastFrameTime = now;
+    GAME.gameStartTime = now;
+    GAME.lastSecondTime = now;
+    
+    sendSessionUpdate("gameStart");
     GAME.animationId = requestAnimationFrame(gameLoop);
   }
 
@@ -893,8 +903,9 @@
       return;
     }
 
-    const deltaSeconds = Math.min((timestamp - GAME.lastTime) / 1000, CONFIG.maxAccumulator);
-    GAME.lastTime = timestamp;
+    const rawDelta = timestamp - GAME.lastFrameTime;
+    const deltaSeconds = Math.min(rawDelta / 1000, CONFIG.maxAccumulator);
+    GAME.lastFrameTime = timestamp;
 
     GAME.elapsedAccumulator += deltaSeconds;
     let fixedUpdates = 0;
@@ -905,17 +916,20 @@
       fixedUpdates++;
     }
 
-    const elapsedTime = (timestamp - GAME.lastTime) / 1000 + deltaSeconds;
-    if (elapsedTime >= 1) {
-      GAME.timeLeft -= 1;
-      GAME.lastTime = timestamp;
+    const elapsedSinceLastSecond = timestamp - GAME.lastSecondTime;
+    if (elapsedSinceLastSecond >= 1000) {
+      const secondsPassed = Math.floor(elapsedSinceLastSecond / 1000);
+      GAME.timeLeft = Math.max(0, GAME.timeLeft - secondsPassed);
+      GAME.lastSecondTime += secondsPassed * 1000;
+      
+      updateHud();
+
       if (GAME.timeLeft <= 0) {
         GAME.timeLeft = 0;
         updateHud();
         endGame();
         return;
       }
-      updateHud();
     }
 
     render();
