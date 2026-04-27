@@ -1,4 +1,0 @@
-node_modules/
-.tmp-server-out.log
-.tmp-server-err.log
-data/scores.json

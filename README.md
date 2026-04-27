@@ -1,120 +1,369 @@
-# 猫咪冲刺食堂 v0.2
+# Cat Game Backend Redesign
 
-一个零依赖的前后端猫咪小游戏：
+## 目标
 
-- 前端：原生 HTML/CSS/Canvas，负责游戏画面、操作、动画和排行榜展示。
-- 后端：Node.js 内建 `http` 服务，负责静态资源分发、游戏配置接口、分数提交和本地排行榜持久化。
+这个仓库不再做“前端报最终分数，后端做弱校验”的方案，直接重设计为一套可信后端：
 
-## 版本 0.2 新功能
+- 前端只能创建会话、上报事件、请求结算
+- 最终分数只由后端计算
+- 排行榜只接受服务端结算结果
+- 会话有明确状态流和重复提交防护
 
-### 🎮 游戏玩法
-- **90秒限时接物玩法**：三阶段难度递进
-- **3条命机制**：接住炸弹或漏掉好鱼会减少生命
-- **三种敌人类型**：UFO、飞鸟、幽灵，不同移动模式和难度
+这次任务的核心不是做页面，而是做一套有后端价值的小游戏结算系统。
 
-### ⚡ 技能系统
-- **冲刺 (Q键)**：快速移动，可升级提升速度和持续时间
-- **清屏 (E键)**：清除所有炸弹，可升级减少冷却时间和清除敌人
-- **技能升级**：收集金鱼获得金币，使用金币升级技能
+## 产品定义
 
-### 🎁 道具系统
-- **🛡️ 护盾**：免疫伤害 5秒
-- **✨ 双倍**：分数翻倍 8秒
-- **🧲 磁铁**：自动吸引附近物品 6秒
-- **⏰ 减缓**：时间变慢 5秒
+项目名称：
+`cat-game-backend`
 
-### 🔥 三阶段难度
-1. **悠闲夜市 (0-30秒)**：基础速度，较少炸弹，无敌人
-2. **忙碌高峰 (30-60秒)**：速度提升，敌人出现（UFO、飞鸟）
-3. **疯狂周末 (60-90秒)**：极速掉落，危险加倍，幽灵敌人出现
+一句话定义：
+一个为猫咪小游戏提供会话管理、事件接收、服务端结算和排行榜查询的轻量后端服务。
 
-### 📱 移动端支持
-- 左右区域点击控制移动
-- 技能按钮点击释放
-- 暂停按钮随时暂停
-- 完整的触控体验优化
+## 一期范围
 
-### 🔒 后端安全
-- **Session 管理**：每局游戏独立 session
-- **多重分数验证**：
-  - 最小/最大游戏时长限制
-  - 分数与收集物品匹配验证
-  - 物品数量合理性验证
-  - 非法分数直接拒绝入榜
+一期只做后端，不做复杂前端。
 
-## 启动
+必须完成：
 
-```bash
-npm start
+- 创建游戏会话
+- 启动会话
+- 接收游戏事件
+- 关闭并结算会话
+- 排行榜查询
+- 排行榜分页
+- 重复提交防护
+- 会话超时清理
+- 基础风控校验
+
+明确不做：
+
+- 用户登录
+- 数据库接入
+- WebSocket
+- 多人对战
+- 管理后台
+- 实时反作弊
+
+## 核心设计
+
+### 1. 会话状态机
+
+每个 session 必须有明确状态：
+
+- `created`
+- `playing`
+- `finished`
+- `closed`
+- `expired`
+
+允许流转：
+
+- `created -> playing`
+- `playing -> finished`
+- `created -> closed`
+- `playing -> closed`
+- `created/playing -> expired`
+
+禁止：
+
+- `finished -> playing`
+- `finished -> finished`
+- `closed -> playing`
+- `expired -> finish`
+
+### 2. 事件驱动结算
+
+前端不再提交 `score`。
+
+前端只上报事件，例如：
+
+- `fish_caught`
+- `golden_fish_caught`
+- `bomb_hit`
+- `enemy_defeated`
+- `power_up_used`
+- `skill_used`
+
+后端保存事件流，再根据规则计算：
+
+- 基础得分
+- 惩罚
+- 连击加成
+- 道具加成
+- 最终得分
+
+### 3. 服务端可信排行榜
+
+排行榜记录来源只能是：
+
+- 已完成结算的 session
+- 每个 session 只能入榜一次
+- 记录中必须保留结算快照
+
+排行榜字段：
+
+- `id`
+- `sessionId`
+- `playerName`
+- `score`
+- `createdAt`
+- `summary`
+
+## 推荐接口
+
+### `POST /api/sessions`
+
+创建会话。
+
+请求：
+
+```json
+{
+  "playerName": "Guest Cat"
+}
 ```
 
-默认地址：
+响应：
+
+```json
+{
+  "ok": true,
+  "sessionId": "sess_xxx",
+  "state": "created"
+}
+```
+
+### `POST /api/sessions/:sessionId/start`
+
+启动会话。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "state": "playing",
+  "startedAt": "2026-04-27T00:00:00.000Z"
+}
+```
+
+### `POST /api/sessions/:sessionId/events`
+
+追加事件。
+
+请求：
+
+```json
+{
+  "type": "fish_caught",
+  "occurredAt": 1710000000000,
+  "payload": {
+    "combo": 3
+  }
+}
+```
+
+响应：
+
+```json
+{
+  "ok": true,
+  "accepted": true,
+  "eventId": "evt_xxx"
+}
+```
+
+### `POST /api/sessions/:sessionId/finish`
+
+结束并结算。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "state": "finished",
+  "result": {
+    "score": 180,
+    "summary": {
+      "fishCaught": 10,
+      "goldenFishCaught": 2,
+      "bombHit": 1,
+      "enemyDefeated": 3
+    }
+  }
+}
+```
+
+### `POST /api/sessions/:sessionId/close`
+
+主动关闭不入榜会话。
+
+### `GET /api/leaderboard?page=1&pageSize=20`
+
+分页查询排行榜。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "page": 1,
+  "pageSize": 20,
+  "total": 135,
+  "items": [
+    {
+      "rank": 1,
+      "playerName": "Guest Cat",
+      "score": 180,
+      "createdAt": "2026-04-27T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+## 数据模型
+
+一期先用文件存储，目录建议：
 
 ```text
-http://127.0.0.1:4321
+data/
+  sessions/
+    sess_xxx.json
+  leaderboard.json
+  events.log
 ```
 
-## 操作说明
+### Session
 
-### 桌面端
-| 按键 | 功能 |
-|------|------|
-| ← → / A D | 移动 |
-| Q | 冲刺技能 |
-| E | 清屏技能 |
-| P / ESC | 暂停/继续 |
-| 空格键 | 开始/继续游戏 |
-
-### 移动端
-| 操作 | 功能 |
-|------|------|
-| 点击左半屏 | 向左移动 |
-| 点击右半屏 | 向右移动 |
-| 点击技能按钮 | 释放对应技能 |
-| 点击暂停按钮 | 暂停/继续 |
-
-## 排行榜
-
-游戏结束后可以输入猫咪代号提交分数到排行榜。排行榜会显示前 10 名，前三名有特殊排名样式。
-
-### 防作弊机制
-- 分数必须大于 0 才能提交
-- 游戏时长必须在合理范围内（5秒 - 5分钟）
-- 分数必须与收集的物品数量匹配
-- 异常分数会被直接拒绝，session 会被关闭
-
-## 项目结构
-
-```
-.
-├── public/
-│   ├── index.html    # 前端页面
-│   ├── styles.css    # 样式文件
-│   └── app.js        # 游戏逻辑
-├── data/
-│   └── scores.json   # 排行榜数据
-├── server.js         # 后端服务
-├── package.json
-└── README.md
+```json
+{
+  "id": "sess_xxx",
+  "playerName": "Guest Cat",
+  "state": "playing",
+  "createdAt": "2026-04-27T00:00:00.000Z",
+  "startedAt": "2026-04-27T00:00:05.000Z",
+  "finishedAt": null,
+  "closedAt": null,
+  "scoreSubmitted": false,
+  "events": [],
+  "result": null
+}
 ```
 
-## 更新日志
+### Event
 
-### v0.2.0 (2026-04-27)
-- ✨ 重做开始页、暂停页、结算页
-- ✨ 添加三阶段难度系统
-- ✨ 实现技能升级系统和金币机制
-- ✨ 添加三种敌人类型（UFO、飞鸟、幽灵）
-- ✨ 完善移动端触控支持
-- ✨ 增强后端分数验证（多重防作弊机制）
-- ✨ 修复乱码问题
-- ✨ 游戏时长从 60秒 增加到 90秒
-- ✨ 小橘猫新外观（橙色老虎纹）
+```json
+{
+  "id": "evt_xxx",
+  "type": "fish_caught",
+  "occurredAt": 1710000000000,
+  "receivedAt": "2026-04-27T00:00:10.000Z",
+  "payload": {
+    "combo": 3
+  }
+}
+```
 
-### v0.1.0
-- 基础接物玩法
-- 45秒限时模式
-- 3条命机制
-- 普通鱼、金鱼、炸弹三种掉落物
-- 本地排行榜存储
-- 基础移动端支持
+## 结算规则建议
+
+先保持简单、稳定、可验证：
+
+- `fish_caught`: +10
+- `golden_fish_caught`: +25
+- `enemy_defeated`: +15
+- `bomb_hit`: -10
+- `power_up_used`: 0
+- `skill_used`: 0
+
+一期不要做复杂实时组合技，只做：
+
+- 基础事件累计
+- 可选最大连击加成
+- 得分不小于 0
+
+## 风控要求
+
+必须校验：
+
+- session 必须存在
+- 状态必须允许当前操作
+- finish 只能调用一次
+- closed/expired session 不接受事件
+- 单局事件数不能无限增长
+- 单位时间内事件频率不能明显异常
+- 事件时间不能早于 session.start
+- 事件时间不能晚于 finish 太多
+
+## 技术建议
+
+建议栈：
+
+- Node.js
+- 原生 `http` 或 `express`
+- `zod` 做请求校验
+- 文件存储先跑通，再考虑 SQLite
+
+如果只做一期最小实现，优先：
+
+- `Node.js + express + zod`
+
+## 目录建议
+
+```text
+src/
+  app.js
+  server.js
+  routes/
+    sessions.js
+    leaderboard.js
+  services/
+    session-service.js
+    scoring-service.js
+    leaderboard-service.js
+  repositories/
+    session-repo.js
+    leaderboard-repo.js
+  utils/
+    lock.js
+    clock.js
+    id.js
+data/
+tests/
+```
+
+## 开发顺序
+
+1. 初始化 Node 项目
+2. 搭基础 HTTP 服务
+3. 实现 session 状态机
+4. 实现事件追加接口
+5. 实现服务端结算
+6. 实现排行榜分页
+7. 加锁与原子写入
+8. 补测试
+9. 写 README 接口说明
+
+## 验收标准
+
+- 前端不能直接提交最终分数
+- 同一 session 不能重复结算
+- 同一 session 不能重复入榜
+- 非法状态流会被拒绝
+- 排行榜支持分页
+- 重启服务后数据仍可恢复
+- 关键流程有测试
+
+## 下一步
+
+下一轮直接开始实现最小后端骨架：
+
+- 初始化 `package.json`
+- 建立 `src/server.js`
+- 建立 `POST /api/sessions`
+- 建立 `POST /api/sessions/:id/start`
+- 建立 `POST /api/sessions/:id/events`
+- 建立 `POST /api/sessions/:id/finish`
+- 建立 `GET /api/leaderboard`
+
+这次不要再回到旧模式，不接受前端直接报分。
