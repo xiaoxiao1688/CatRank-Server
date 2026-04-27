@@ -109,13 +109,57 @@
 - `createdAt`
 - `summary`
 
-## 推荐接口
+## 快速开始
 
-### `POST /api/sessions`
+### 安装依赖
 
-创建会话。
+```bash
+npm install
+```
 
-请求：
+### 启动服务
+
+```bash
+npm start
+```
+
+### 开发模式（自动重启）
+
+```bash
+npm run dev
+```
+
+### 运行检查
+
+```bash
+npm run check
+```
+
+服务默认运行在 `http://127.0.0.1:4321`
+
+## API 接口
+
+### 健康检查
+
+#### `GET /healthz`
+
+检查服务是否正常运行。
+
+响应：
+
+```json
+{
+  "ok": true
+}
+```
+
+### 会话管理
+
+#### `POST /api/sessions`
+
+创建新的游戏会话。
+
+请求（可选）：
 
 ```json
 {
@@ -123,33 +167,62 @@
 }
 ```
 
+- `playerName`: 玩家名称，可选，最长 20 字符，默认 "Guest Cat"
+
+响应：
+
+```json
+{
+  "ok": true,
+  "sessionId": "sess_1710000000000_abc123",
+  "state": "created",
+  "createdAt": "2026-04-27T00:00:00.000Z"
+}
+```
+
+#### `GET /api/sessions/:sessionId`
+
+查询会话详情。
+
+响应：
+
+```json
+{
+  "ok": true,
+  "session": {
+    "id": "sess_xxx",
+    "playerName": "Guest Cat",
+    "state": "playing",
+    "createdAt": "2026-04-27T00:00:00.000Z",
+    "startedAt": "2026-04-27T00:00:05.000Z",
+    "finishedAt": null,
+    "closedAt": null,
+    "expiredAt": null,
+    "submittedToLeaderboard": false,
+    "events": [],
+    "result": null
+  }
+}
+```
+
+#### `POST /api/sessions/:sessionId/start`
+
+启动会话，状态从 `created` 变为 `playing`。
+
 响应：
 
 ```json
 {
   "ok": true,
   "sessionId": "sess_xxx",
-  "state": "created"
-}
-```
-
-### `POST /api/sessions/:sessionId/start`
-
-启动会话。
-
-响应：
-
-```json
-{
-  "ok": true,
   "state": "playing",
   "startedAt": "2026-04-27T00:00:00.000Z"
 }
 ```
 
-### `POST /api/sessions/:sessionId/events`
+#### `POST /api/sessions/:sessionId/events`
 
-追加事件。
+上报游戏事件。只能在 `playing` 状态下调用。
 
 请求：
 
@@ -163,25 +236,38 @@
 }
 ```
 
+- `type`: 事件类型，必须是以下之一：
+  - `fish_caught`
+  - `golden_fish_caught`
+  - `bomb_hit`
+  - `enemy_defeated`
+  - `power_up_used`
+  - `skill_used`
+- `occurredAt`: 事件发生时间戳（毫秒），可选，默认当前时间
+- `payload`: 额外数据，可选
+
 响应：
 
 ```json
 {
   "ok": true,
   "accepted": true,
-  "eventId": "evt_xxx"
+  "eventId": "evt_1710000000000_abc123"
 }
 ```
 
-### `POST /api/sessions/:sessionId/finish`
+#### `POST /api/sessions/:sessionId/finish`
 
-结束并结算。
+结束会话并结算，状态从 `playing` 变为 `finished`，结果自动提交到排行榜。
+
+注意：每个 session 只能调用一次 `finish`，重复调用会返回 409 错误。
 
 响应：
 
 ```json
 {
   "ok": true,
+  "sessionId": "sess_xxx",
   "state": "finished",
   "result": {
     "score": 180,
@@ -189,19 +275,62 @@
       "fishCaught": 10,
       "goldenFishCaught": 2,
       "bombHit": 1,
-      "enemyDefeated": 3
+      "enemyDefeated": 3,
+      "powerUpsUsed": 0,
+      "skillsUsed": 0,
+      "maxCombo": 5,
+      "totalEvents": 16
+    },
+    "breakdown": {
+      "baseScore": 175,
+      "comboBonus": 5
     }
   }
 }
 ```
 
-### `POST /api/sessions/:sessionId/close`
+#### `POST /api/sessions/:sessionId/close`
 
-主动关闭不入榜会话。
+主动关闭会话（不入榜），状态从 `created` 或 `playing` 变为 `closed`。
 
-### `GET /api/leaderboard?page=1&pageSize=20`
+响应：
 
-分页查询排行榜。
+```json
+{
+  "ok": true,
+  "sessionId": "sess_xxx",
+  "state": "closed",
+  "closedAt": "2026-04-27T00:00:00.000Z"
+}
+```
+
+#### `POST /api/sessions/cleanup-expired`
+
+手动触发过期会话清理。服务也会自动每分钟执行一次清理。
+
+- `created` 或 `playing` 状态的会话，如果超过 `SESSION_TTL_MS`（默认 15 分钟）没有活动，会被标记为 `expired`
+- `finished` 或 `closed` 状态的会话不会过期
+
+响应：
+
+```json
+{
+  "ok": true,
+  "expiredCount": 3
+}
+```
+
+- `expiredCount`: 本次清理中被标记为过期的会话数量
+
+### 排行榜
+
+#### `GET /api/leaderboard?page=1&pageSize=20`
+
+分页查询排行榜。按分数降序，分数相同则按时间升序。
+
+参数：
+- `page`: 页码，可选，默认 1
+- `pageSize`: 每页数量，可选，默认 20，最大 100
 
 响应：
 
@@ -214,11 +343,64 @@
   "items": [
     {
       "rank": 1,
+      "sessionId": "sess_xxx",
       "playerName": "Guest Cat",
       "score": 180,
-      "createdAt": "2026-04-27T00:00:00.000Z"
+      "createdAt": "2026-04-27T00:00:00.000Z",
+      "summary": {
+        "fishCaught": 10,
+        "goldenFishCaught": 2,
+        "bombHit": 1,
+        "enemyDefeated": 3,
+        "powerUpsUsed": 0,
+        "skillsUsed": 0,
+        "maxCombo": 5,
+        "totalEvents": 16
+      }
     }
   ]
+}
+```
+
+## 错误响应格式
+
+所有错误响应都遵循统一格式：
+
+### 业务错误（HttpError）
+
+```json
+{
+  "ok": false,
+  "message": "Session not found",
+  "details": null
+}
+```
+
+常见 HTTP 状态码：
+- `400`: 请求参数错误
+- `404`: 资源不存在（如 session 不存在）
+- `409`: 状态冲突（如状态机不允许的操作、重复结算）
+- `410`: 资源已过期（如 session 已过期）
+- `422`: 无法处理的实体（如事件数量超限、时间戳异常）
+- `500`: 服务器内部错误
+
+### 验证错误（ZodError）
+
+当请求参数验证失败时返回：
+
+```json
+{
+  "ok": false,
+  "message": "Validation failed",
+  "details": {
+    "issues": [
+      {
+        "field": "playerName",
+        "message": "String must contain at most 20 character(s)",
+        "code": "too_big"
+      }
+    ]
+  }
 }
 ```
 
@@ -245,11 +427,25 @@ data/
   "startedAt": "2026-04-27T00:00:05.000Z",
   "finishedAt": null,
   "closedAt": null,
-  "scoreSubmitted": false,
+  "expiredAt": null,
+  "submittedToLeaderboard": false,
   "events": [],
   "result": null
 }
 ```
+
+字段说明：
+- `id`: 会话唯一标识
+- `playerName`: 玩家名称
+- `state`: 当前状态（created/playing/finished/closed/expired）
+- `createdAt`: 创建时间
+- `startedAt`: 开始时间
+- `finishedAt`: 结束时间
+- `closedAt`: 关闭时间
+- `expiredAt`: 过期时间
+- `submittedToLeaderboard`: 是否已提交到排行榜
+- `events`: 事件列表
+- `result`: 结算结果（state 为 finished 时有值）
 
 ### Event
 

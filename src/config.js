@@ -1,0 +1,32 @@
+const path = require("path");
+
+const ROOT_DIR = path.resolve(__dirname, "..");
+const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT_DIR, "data");
+const SESSION_DIR = path.join(DATA_DIR, "sessions");
+const LEADERBOARD_FILE = path.join(DATA_DIR, "leaderboard.json");
+const EVENTS_LOG_FILE = path.join(DATA_DIR, "events.log");
+
+function parseEnvNumber(key, defaultValue) {
+  const value = process.env[key];
+  if (value === undefined || value === "") {
+    return defaultValue;
+  }
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : defaultValue;
+}
+
+module.exports = {
+  HOST: process.env.HOST || "127.0.0.1",
+  PORT: Number(process.env.PORT || 4321),
+  ROOT_DIR,
+  DATA_DIR,
+  SESSION_DIR,
+  LEADERBOARD_FILE,
+  EVENTS_LOG_FILE,
+  SESSION_TTL_MS: parseEnvNumber("SESSION_TTL_MS", 15 * 60 * 1000),
+  MAX_EVENTS_PER_SESSION: parseEnvNumber("MAX_EVENTS_PER_SESSION", 1000),
+  MAX_EVENT_FUTURE_SKEW_MS: parseEnvNumber("MAX_EVENT_FUTURE_SKEW_MS", 30 * 1000),
+  MAX_EVENT_PAST_SKEW_MS: parseEnvNumber("MAX_EVENT_PAST_SKEW_MS", 5 * 1000),
+  LOCK_TIMEOUT_MS: parseEnvNumber("LOCK_TIMEOUT_MS", 5 * 1000),
+  LOCK_RETRY_MS: parseEnvNumber("LOCK_RETRY_MS", 100)
+};
