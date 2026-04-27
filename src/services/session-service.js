@@ -7,7 +7,12 @@ const {
 const { EVENT_TYPES, SESSION_STATES } = require("../game-rules");
 const { appendEventLog } = require("../repositories/event-log-repo");
 const { addLeaderboardEntry } = require("../repositories/leaderboard-repo");
-const { getSessionById, listSessions, saveSession } = require("../repositories/session-repo");
+const {
+  getSessionById,
+  listSessions,
+  saveSession,
+  withSessionLock
+} = require("../repositories/session-repo");
 const { calculateSessionResult } = require("./scoring-service");
 const { createId } = require("../utils/id");
 const { isoNow, nowMs } = require("../utils/clock");
@@ -40,90 +45,116 @@ function createSessionService() {
     },
 
     async startSession(sessionId) {
-      const session = await requireSession(sessionId);
-      await expireIfNeeded(session);
-      ensureState(session, [SESSION_STATES.CREATED], "Session cannot be started");
+      return withSessionLock(sessionId, async () => {
+        let session = await getSessionById(sessionId);
+        if (!session) {
+          throw new HttpError(404, "Session not found");
+        }
 
-      session.state = SESSION_STATES.PLAYING;
-      session.startedAt = isoNow();
+        await expireIfNeededWithSave(session);
+        ensureState(session, [SESSION_STATES.CREATED], "Session cannot be started");
 
-      await saveSession(session);
-      return session;
+        session.state = SESSION_STATES.PLAYING;
+        session.startedAt = isoNow();
+
+        await saveSession(session);
+        return session;
+      });
     },
 
     async addEvent(sessionId, input) {
-      const session = await requireSession(sessionId);
-      await expireIfNeeded(session);
-      ensureState(session, [SESSION_STATES.PLAYING], "Session is not accepting events");
+      return withSessionLock(sessionId, async () => {
+        let session = await getSessionById(sessionId);
+        if (!session) {
+          throw new HttpError(404, "Session not found");
+        }
 
-      if (!EVENT_TYPES.includes(input.type)) {
-        throw new HttpError(422, "Unsupported event type");
-      }
+        await expireIfNeededWithSave(session);
+        ensureState(session, [SESSION_STATES.PLAYING], "Session is not accepting events");
 
-      if (session.events.length >= MAX_EVENTS_PER_SESSION) {
-        throw new HttpError(422, "Session event limit exceeded");
-      }
+        if (!EVENT_TYPES.includes(input.type)) {
+          throw new HttpError(422, "Unsupported event type");
+        }
 
-      const event = buildEvent(session, input);
-      session.events.push(event);
+        if (session.events.length >= MAX_EVENTS_PER_SESSION) {
+          throw new HttpError(422, "Session event limit exceeded");
+        }
 
-      await saveSession(session);
-      await appendEventLog({
-        sessionId: session.id,
-        playerName: session.playerName,
-        ...event
+        const event = buildEvent(session, input);
+
+        const eventRecord = {
+          sessionId: session.id,
+          playerName: session.playerName,
+          ...event
+        };
+        await appendEventLog(eventRecord);
+
+        session.events.push(event);
+        await saveSession(session);
+
+        return event;
       });
-
-      return event;
     },
 
     async finishSession(sessionId) {
-      const session = await requireSession(sessionId);
-      await expireIfNeeded(session);
+      return withSessionLock(sessionId, async () => {
+        let session = await getSessionById(sessionId);
+        if (!session) {
+          throw new HttpError(404, "Session not found");
+        }
 
-      if (session.submittedToLeaderboard) {
-        throw new HttpError(409, "Session already submitted to leaderboard", {
-          currentState: session.state,
-          submittedToLeaderboard: true
-        });
-      }
+        await expireIfNeededWithSave(session);
 
-      ensureState(session, [SESSION_STATES.PLAYING], "Session cannot be finished");
+        if (session.submittedToLeaderboard) {
+          throw new HttpError(409, "Session already submitted to leaderboard", {
+            currentState: session.state,
+            submittedToLeaderboard: true
+          });
+        }
 
-      session.state = SESSION_STATES.FINISHED;
-      session.finishedAt = isoNow();
-      session.result = calculateSessionResult(session.events);
+        ensureState(session, [SESSION_STATES.PLAYING], "Session cannot be finished");
 
-      const entry = {
-        id: createId("rank"),
-        sessionId: session.id,
-        playerName: session.playerName,
-        score: session.result.score,
-        createdAt: session.finishedAt,
-        summary: session.result.summary
-      };
+        session.state = SESSION_STATES.FINISHED;
+        session.finishedAt = isoNow();
+        session.result = calculateSessionResult(session.events);
 
-      await addLeaderboardEntry(entry);
-      session.submittedToLeaderboard = true;
+        const entry = {
+          id: createId("rank"),
+          sessionId: session.id,
+          playerName: session.playerName,
+          score: session.result.score,
+          createdAt: session.finishedAt,
+          summary: session.result.summary
+        };
 
-      await saveSession(session);
-      return session;
+        await addLeaderboardEntry(entry);
+        session.submittedToLeaderboard = true;
+
+        await saveSession(session);
+        return session;
+      });
     },
 
     async closeSession(sessionId) {
-      const session = await requireSession(sessionId);
-      await expireIfNeeded(session);
-      ensureState(
-        session,
-        [SESSION_STATES.CREATED, SESSION_STATES.PLAYING],
-        "Session cannot be closed"
-      );
+      return withSessionLock(sessionId, async () => {
+        let session = await getSessionById(sessionId);
+        if (!session) {
+          throw new HttpError(404, "Session not found");
+        }
 
-      session.state = SESSION_STATES.CLOSED;
-      session.closedAt = isoNow();
+        await expireIfNeededWithSave(session);
+        ensureState(
+          session,
+          [SESSION_STATES.CREATED, SESSION_STATES.PLAYING],
+          "Session cannot be closed"
+        );
 
-      await saveSession(session);
-      return session;
+        session.state = SESSION_STATES.CLOSED;
+        session.closedAt = isoNow();
+
+        await saveSession(session);
+        return session;
+      });
     },
 
     async cleanupExpiredSessions() {
@@ -132,10 +163,19 @@ function createSessionService() {
 
       for (const session of sessions) {
         if (isExpiredSession(session)) {
-          session.state = SESSION_STATES.EXPIRED;
-          session.expiredAt = isoNow();
-          await saveSession(session);
-          expiredCount += 1;
+          const result = await withSessionLock(session.id, async () => {
+            const lockedSession = await getSessionById(session.id);
+            if (lockedSession && isExpiredSession(lockedSession)) {
+              lockedSession.state = SESSION_STATES.EXPIRED;
+              lockedSession.expiredAt = isoNow();
+              await saveSession(lockedSession);
+              return lockedSession;
+            }
+            return null;
+          });
+          if (result) {
+            expiredCount += 1;
+          }
         }
       }
 
@@ -175,7 +215,7 @@ function ensureState(session, allowedStates, message) {
   }
 }
 
-async function expireIfNeeded(session) {
+async function expireIfNeededWithSave(session) {
   if (!isExpiredSession(session)) {
     return;
   }

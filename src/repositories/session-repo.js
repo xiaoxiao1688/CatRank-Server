@@ -2,6 +2,7 @@ const path = require("path");
 
 const { SESSION_DIR } = require("../config");
 const { ensureDir, listJsonFiles, readJson, writeJsonAtomic } = require("../utils/file-store");
+const { withFileLock } = require("../utils/lock");
 
 function getSessionFilePath(sessionId) {
   return path.join(SESSION_DIR, `${sessionId}.json`);
@@ -28,10 +29,31 @@ async function listSessions() {
   return sessions.filter(Boolean);
 }
 
+async function withSessionLock(sessionId, callback) {
+  const sessionPath = getSessionFilePath(sessionId);
+  return withFileLock(sessionPath, callback);
+}
+
+async function updateSessionAtomic(sessionId, updater) {
+  return withSessionLock(sessionId, async () => {
+    const session = await getSessionById(sessionId);
+    if (!session) {
+      return null;
+    }
+    const updated = await updater(session);
+    if (updated !== null && updated !== undefined) {
+      await saveSession(updated);
+    }
+    return updated;
+  });
+}
+
 module.exports = {
   ensureSessionStorage,
   getSessionById,
   saveSession,
   listSessions,
-  getSessionFilePath
+  getSessionFilePath,
+  withSessionLock,
+  updateSessionAtomic
 };
