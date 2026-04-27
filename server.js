@@ -17,11 +17,15 @@ const LOCK_WAIT_INTERVAL_MS = 100;
 const LOCK_STALE_MS = 30000;
 const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SESSION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
-const MIN_SESSION_AGE_MS = 1000;
+const MIN_SESSION_AGE_MS = 5000;
+const MAX_SESSION_AGE_MS = 5 * 60 * 1000;
+const SCORE_PER_FISH_MIN = 8;
+const SCORE_PER_GOLDEN_MIN = 20;
+const MAX_BOMBS_POSSIBLE = 50;
 
 const GAME_CONFIG = {
   title: "Cat Snack Dash",
-  durationSeconds: 60,
+  durationSeconds: 90,
   maxLives: 3,
   fishScore: 10,
   goldenFishScore: 25,
@@ -255,6 +259,10 @@ function validateScore(score, session) {
     return { valid: false, reason: "Score cannot be negative" };
   }
 
+  if (score === 0) {
+    return { valid: false, reason: "Score must be greater than 0" };
+  }
+
   const maxPossibleScore = calculateMaxPossibleScore();
   if (score > maxPossibleScore) {
     return {
@@ -265,7 +273,60 @@ function validateScore(score, session) {
 
   const ageMs = Date.now() - session.startedAt;
   if (ageMs < MIN_SESSION_AGE_MS) {
-    return { valid: false, reason: "Session ended too quickly" };
+    return {
+      valid: false,
+      reason: `Session ended too quickly (${Math.round(ageMs / 1000)}s < ${MIN_SESSION_AGE_MS / 1000}s)`
+    };
+  }
+
+  if (ageMs > MAX_SESSION_AGE_MS) {
+    return {
+      valid: false,
+      reason: `Session expired (${Math.round(ageMs / 1000)}s > ${MAX_SESSION_AGE_MS / 1000}s)`
+    };
+  }
+
+  const items = session.analytics?.itemsCaught || { fish: 0, golden: 0, bomb: 0 };
+  
+  const minExpectedScore = items.fish * SCORE_PER_FISH_MIN + items.golden * SCORE_PER_GOLDEN_MIN;
+  const maxExpectedScore = items.fish * GAME_CONFIG.fishScore * 2 * 2 + items.golden * GAME_CONFIG.goldenFishScore * 2 * 2;
+
+  if (score < minExpectedScore) {
+    return {
+      valid: false,
+      reason: `Score too low for collected items (${score} < ${minExpectedScore})`
+    };
+  }
+
+  if (score > maxExpectedScore && score > minExpectedScore * 2) {
+    return {
+      valid: false,
+      reason: `Score too high for collected items (${score} > ${maxExpectedScore})`
+    };
+  }
+
+  const durationSeconds = Math.min(ageMs / 1000, GAME_CONFIG.durationSeconds);
+  const maxItemsPerSecond = GAME_CONFIG.maxItemsPerSecond;
+  const totalItemsCollected = items.fish + items.golden + items.bomb;
+  const maxPossibleItems = Math.floor(durationSeconds * maxItemsPerSecond * 0.7);
+
+  if (totalItemsCollected > maxPossibleItems + 10) {
+    return {
+      valid: false,
+      reason: `Too many items collected (${totalItemsCollected} > ${maxPossibleItems})`
+    };
+  }
+
+  if (items.bomb > MAX_BOMBS_POSSIBLE) {
+    return {
+      valid: false,
+      reason: `Too many bombs caught (${items.bomb} > ${MAX_BOMBS_POSSIBLE})`
+    };
+  }
+
+  const activityDurationMs = session.lastActivityAt - session.startedAt;
+  if (activityDurationMs < durationSeconds * 0.5 && activityDurationMs > 0) {
+    log("WARN", `Suspicious activity duration: ${activityDurationMs}ms for ${durationSeconds}s game`);
   }
 
   return { valid: true };

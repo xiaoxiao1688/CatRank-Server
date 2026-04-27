@@ -8,21 +8,53 @@
   const livesValue = document.getElementById("lives-value");
   const timeValue = document.getElementById("time-value");
   const levelValue = document.getElementById("level-value");
-  const statusValue = document.getElementById("status-value");
-  const overlay = document.getElementById("canvas-overlay");
-  const overlayText = document.getElementById("overlay-text");
+  const comboValue = document.getElementById("combo-value");
+  const coinsValue = document.getElementById("coins-value");
+
+  const startOverlay = document.getElementById("start-overlay");
+  const pauseOverlay = document.getElementById("pause-overlay");
+  const gameoverOverlay = document.getElementById("gameover-overlay");
+
+  const pauseScore = document.getElementById("pause-score");
+  const pauseTime = document.getElementById("pause-time");
+
+  const finalScoreDisplay = document.getElementById("final-score-display");
+  const finalMaxCombo = document.getElementById("final-max-combo");
+  const finalFishCaught = document.getElementById("final-fish-caught");
+  const finalGoldenCaught = document.getElementById("final-golden-caught");
+  const finalCoinsEarned = document.getElementById("final-coins-earned");
+  const gameoverTag = document.getElementById("gameover-tag");
+  const gameoverTitle = document.getElementById("gameover-title");
+
   const startButton = document.getElementById("start-button");
+  const overlayStartButton = document.getElementById("overlay-start-button");
   const refreshButton = document.getElementById("refresh-button");
+  const resumeButton = document.getElementById("resume-button");
+  const quitButton = document.getElementById("quit-button");
+  const playAgainButton = document.getElementById("play-again-button");
+  const submitScoreButton = document.getElementById("submit-score-button");
+  const pauseButton = document.getElementById("pause-button");
+
   const leaderboardList = document.getElementById("leaderboard-list");
   const scoreDialog = document.getElementById("score-dialog");
   const scoreForm = document.getElementById("score-form");
   const playerNameInput = document.getElementById("player-name");
   const finalScoreText = document.getElementById("final-score-text");
   const skipSubmitButton = document.getElementById("skip-submit");
+
   const skillDashButton = document.getElementById("skill-dash");
   const skillClearButton = document.getElementById("skill-clear");
+  const skillUpgradeButton = document.getElementById("skill-upgrade");
   const skillDashCooldown = document.getElementById("skill-dash-cooldown");
   const skillClearCooldown = document.getElementById("skill-clear-cooldown");
+  const skillDashLevel = document.getElementById("skill-dash-level");
+  const skillClearLevel = document.getElementById("skill-clear-level");
+  const upgradeCostDisplay = document.getElementById("upgrade-cost");
+
+  const upgradeDialog = document.getElementById("upgrade-dialog");
+  const closeUpgradeButton = document.getElementById("close-upgrade");
+  const upgradeOptions = document.getElementById("upgrade-options");
+
   const powerUpStatus = document.getElementById("power-up-status");
   const touchLeft = document.getElementById("touch-left");
   const touchRight = document.getElementById("touch-right");
@@ -44,22 +76,76 @@
     SLOW_TIME: "slowTime"
   };
 
+  const ENEMY_TYPES = {
+    UFO: "ufo",
+    BIRD: "bird",
+    GHOST: "ghost"
+  };
+
+  const PHASE_CONFIG = {
+    1: {
+      name: "第一阶段",
+      displayName: "悠闲夜市",
+      duration: 30,
+      baseSpawnInterval: 900,
+      minSpawnInterval: 400,
+      baseSpeed: 160,
+      bombChance: 0.12,
+      goldenChance: 0.12,
+      powerUpChance: 0.10,
+      enemyChance: 0,
+      enemySpawnInterval: Infinity,
+      maxItemsPerSecond: 3
+    },
+    2: {
+      name: "第二阶段",
+      displayName: "忙碌高峰",
+      duration: 30,
+      baseSpawnInterval: 700,
+      minSpawnInterval: 250,
+      baseSpeed: 200,
+      bombChance: 0.18,
+      goldenChance: 0.10,
+      powerUpChance: 0.08,
+      enemyChance: 0.08,
+      enemySpawnInterval: 5000,
+      maxItemsPerSecond: 4
+    },
+    3: {
+      name: "第三阶段",
+      displayName: "疯狂周末",
+      duration: 30,
+      baseSpawnInterval: 500,
+      minSpawnInterval: 200,
+      baseSpeed: 240,
+      bombChance: 0.24,
+      goldenChance: 0.08,
+      powerUpChance: 0.06,
+      enemyChance: 0.12,
+      enemySpawnInterval: 3000,
+      maxItemsPerSecond: 5
+    }
+  };
+
   const CONFIG = {
     width: canvas.width,
     height: canvas.height,
-    baseDuration: 60,
+    baseDuration: 90,
     maxLives: 3,
     fishScore: 10,
     goldenFishScore: 25,
+    goldenCoins: 5,
     bombPenalty: 1,
-    baseSpawnInterval: 800,
-    minSpawnInterval: 300,
     playerSpeed: 420,
     dashSpeed: 800,
     dashDuration: 300,
     skillCooldowns: {
       dash: 10000,
       clearBombs: 15000
+    },
+    skillUpgradeCost: {
+      base: 50,
+      multiplier: 1.5
     },
     powerUpDurations: {
       shield: 5000,
@@ -77,14 +163,17 @@
     sessionId: null,
     player: null,
     items: [],
+    enemies: [],
     particles: [],
     backgroundData: null,
     score: 0,
     lives: CONFIG.maxLives,
     timeLeft: CONFIG.baseDuration,
-    level: 1,
+    phase: 1,
+    phaseTimeLeft: 30,
     elapsedAccumulator: 0,
     spawnAccumulator: 0,
+    enemySpawnAccumulator: 0,
     lastFrameTime: 0,
     gameStartTime: 0,
     lastSecondTime: 0,
@@ -92,8 +181,18 @@
     submittedScore: false,
     keys: { left: false, right: false },
     skills: {
-      dash: { active: false, cooldownEnd: 0, lastUsed: 0 },
-      clearBombs: { active: false, cooldownEnd: 0, lastUsed: 0 }
+      dash: {
+        active: false,
+        cooldownEnd: 0,
+        lastUsed: 0,
+        level: 1
+      },
+      clearBombs: {
+        active: false,
+        cooldownEnd: 0,
+        lastUsed: 0,
+        level: 1
+      }
     },
     powerUps: {
       shield: { active: false, endTime: 0 },
@@ -103,7 +202,11 @@
     },
     combo: 0,
     maxCombo: 0,
-    itemsCaught: { fish: 0, golden: 0, bomb: 0 }
+    coins: 0,
+    coinsEarned: 0,
+    itemsCaught: { fish: 0, golden: 0, bomb: 0 },
+    enemiesDefeated: 0,
+    pendingNameSubmit: null
   };
 
   function createPlayer() {
@@ -177,21 +280,20 @@
     };
   }
 
+  function getPhaseConfig() {
+    return PHASE_CONFIG[GAME.phase] || PHASE_CONFIG[1];
+  }
+
   function spawnItem() {
+    const phaseConfig = getPhaseConfig();
     const roll = Math.random();
     let type = ITEM_TYPES.FISH;
-    const timeProgress = 1 - (GAME.timeLeft / CONFIG.baseDuration);
-    const difficultyMultiplier = 1 + timeProgress * 0.5;
 
-    const bombChance = 0.14 * difficultyMultiplier;
-    const goldenChance = 0.12;
-    const powerUpChance = 0.08;
-
-    if (roll > 1 - bombChance) {
+    if (roll > 1 - phaseConfig.bombChance) {
       type = ITEM_TYPES.BOMB;
-    } else if (roll > 1 - bombChance - goldenChance) {
+    } else if (roll > 1 - phaseConfig.bombChance - phaseConfig.goldenChance) {
       type = ITEM_TYPES.GOLDEN;
-    } else if (roll > 1 - bombChance - goldenChance - powerUpChance) {
+    } else if (roll > 1 - phaseConfig.bombChance - phaseConfig.goldenChance - phaseConfig.powerUpChance) {
       const powerUpRoll = Math.random();
       if (powerUpRoll < 0.25) {
         type = ITEM_TYPES.SHIELD;
@@ -204,7 +306,7 @@
       }
     }
 
-    const baseSpeed = 180 + Math.random() * 110;
+    const baseSpeed = phaseConfig.baseSpeed + Math.random() * 60;
     const speedMultiplier = GAME.powerUps.slowTime.active ? 0.5 : 1;
 
     GAME.items.push({
@@ -221,16 +323,105 @@
     });
   }
 
+  function spawnEnemy() {
+    const phaseConfig = getPhaseConfig();
+    if (phaseConfig.enemyChance === 0) return;
+
+    const roll = Math.random();
+    let type = ENEMY_TYPES.UFO;
+    if (roll > 0.66) {
+      type = ENEMY_TYPES.GHOST;
+    } else if (roll > 0.33) {
+      type = ENEMY_TYPES.BIRD;
+    }
+
+    const enemyConfig = {
+      [ENEMY_TYPES.UFO]: {
+        radius: 24,
+        speed: 100,
+        horizontalSpeed: 80,
+        damage: 1,
+        points: 15,
+        coins: 3
+      },
+      [ENEMY_TYPES.BIRD]: {
+        radius: 20,
+        speed: 140,
+        horizontalSpeed: 60,
+        damage: 1,
+        points: 20,
+        coins: 4
+      },
+      [ENEMY_TYPES.GHOST]: {
+        radius: 22,
+        speed: 80,
+        horizontalSpeed: 100,
+        damage: 1,
+        points: 25,
+        coins: 5
+      }
+    };
+
+    const config = enemyConfig[type];
+    const speedMultiplier = GAME.powerUps.slowTime.active ? 0.5 : 1;
+    const startLeft = Math.random() > 0.5;
+
+    GAME.enemies.push({
+      type,
+      x: startLeft ? -40 : CONFIG.width + 40,
+      y: 100 + Math.random() * 150,
+      radius: config.radius,
+      speed: config.speed * speedMultiplier,
+      baseSpeed: config.speed,
+      horizontalSpeed: config.horizontalSpeed * (startLeft ? 1 : -1) * speedMultiplier,
+      baseHorizontalSpeed: config.horizontalSpeed * (startLeft ? 1 : -1),
+      damage: config.damage,
+      points: config.points,
+      coins: config.coins,
+      targetY: CONFIG.height - 100,
+      wobble: Math.random() * Math.PI * 2,
+      rotation: 0
+    });
+  }
+
+  function showComboPopup(combo, x, y) {
+    if (combo < 5 || combo % 5 !== 0) return;
+
+    const popup = document.createElement("div");
+    popup.className = "combo-popup";
+    popup.textContent = `${combo}连击!`;
+    popup.style.left = `${x}px`;
+    popup.style.top = `${y}px`;
+
+    const gameCard = canvas.parentElement;
+    gameCard.appendChild(popup);
+
+    setTimeout(() => {
+      popup.remove();
+    }, 1000);
+  }
+
+  function shakeScreen() {
+    const gameCard = canvas.parentElement;
+    gameCard.classList.add("shake");
+    setTimeout(() => {
+      gameCard.classList.remove("shake");
+    }, 300);
+  }
+
   function resetGame() {
     GAME.player = createPlayer();
     GAME.items = [];
+    GAME.enemies = [];
     GAME.particles = [];
     GAME.score = 0;
     GAME.lives = CONFIG.maxLives;
     GAME.timeLeft = CONFIG.baseDuration;
-    GAME.level = 1;
+    GAME.phase = 1;
+    GAME.phaseTimeLeft = PHASE_CONFIG[1].duration;
     GAME.elapsedAccumulator = 0;
     GAME.spawnAccumulator = 0;
+    GAME.enemySpawnAccumulator = 0;
     GAME.lastFrameTime = 0;
     GAME.gameStartTime = 0;
     GAME.lastSecondTime = 0;
@@ -238,10 +429,19 @@
     GAME.state = GAME_STATE.IDLE;
     GAME.combo = 0;
     GAME.maxCombo = 0;
+    GAME.coins = 0;
+    GAME.coinsEarned = 0;
     GAME.itemsCaught = { fish: 0, golden: 0, bomb: 0 };
+    GAME.enemiesDefeated = 0;
+    GAME.pendingNameSubmit = null;
 
     Object.keys(GAME.skills).forEach(key => {
-      GAME.skills[key] = { active: false, cooldownEnd: 0, lastUsed: 0 };
+      GAME.skills[key] = {
+        active: false,
+        cooldownEnd: 0,
+        lastUsed: 0,
+        level: 1
+      };
     });
 
     Object.keys(GAME.powerUps).forEach(key => {
@@ -255,7 +455,42 @@
     updateHud();
     updateSkillUI();
     updatePowerUpUI();
-    setStatus("等待开始");
+    showStartOverlay();
+  }
+
+  function showStartOverlay() {
+    startOverlay.classList.remove("hidden");
+    pauseOverlay.classList.add("hidden");
+    gameoverOverlay.classList.add("hidden");
+  }
+
+  function showPauseOverlay() {
+    pauseScore.textContent = GAME.score;
+    pauseTime.textContent = `${GAME.timeLeft}s`;
+    pauseOverlay.classList.remove("hidden");
+  }
+
+  function hidePauseOverlay() {
+    pauseOverlay.classList.add("hidden");
+  }
+
+  function showGameOverOverlay(isWin) {
+    gameoverTag.textContent = isWin ? "TIME'S UP!" : "GAME OVER";
+    gameoverTitle.textContent = isWin ? "时间到！" : "游戏结束";
+
+    finalScoreDisplay.textContent = GAME.score;
+    finalMaxCombo.textContent = `${GAME.maxCombo}x`;
+    finalFishCaught.textContent = GAME.itemsCaught.fish;
+    finalGoldenCaught.textContent = GAME.itemsCaught.golden;
+    finalCoinsEarned.textContent = GAME.coinsEarned;
+
+    startOverlay.classList.add("hidden");
+    pauseOverlay.classList.add("hidden");
+    gameoverOverlay.classList.remove("hidden");
+  }
+
+  function hideGameOverOverlay() {
+    gameoverOverlay.classList.add("hidden");
   }
 
   async function createSession() {
@@ -298,7 +533,7 @@
 
     GAME.startingSession = true;
     startButton.disabled = true;
-    setStatus("准备中");
+    overlayStartButton.disabled = true;
 
     try {
       if (GAME.sessionId) {
@@ -311,16 +546,14 @@
       GAME.sessionId = null;
       GAME.startingSession = false;
       startButton.disabled = false;
-      setStatus("启动失败");
-      overlay.classList.remove("hidden");
-      overlayText.textContent = "无法连接到游戏服务，请重试。";
+      overlayStartButton.disabled = false;
       return;
     }
 
     resetGame();
     GAME.state = GAME_STATE.PLAYING;
-    overlay.classList.add("hidden");
-    setStatus("游戏中");
+    startOverlay.classList.add("hidden");
+    hideGameOverOverlay();
     
     const now = performance.now();
     GAME.lastFrameTime = now;
@@ -329,32 +562,44 @@
 
     GAME.startingSession = false;
     startButton.disabled = false;
+    overlayStartButton.disabled = false;
     GAME.animationId = requestAnimationFrame(gameLoop);
   }
 
-  function endGame() {
-    GAME.state = GAME_STATE.ENDED;
+  function pauseGame() {
+    if (GAME.state !== GAME_STATE.PLAYING) return;
+    GAME.state = GAME_STATE.PAUSED;
     cancelAnimationFrame(GAME.animationId);
-    setStatus("已结束");
-    overlay.classList.remove("hidden");
-    overlayText.textContent = "按空格或点击开始再来一局。分数可以提交到后端排行榜。";
-    finalScoreText.textContent = `你的得分：${GAME.score} (最大连击：${GAME.maxCombo}x)`;
-
-    if (typeof scoreDialog.showModal === "function" && !GAME.submittedScore) {
-      playerNameInput.value = "";
-      scoreDialog.showModal();
-    }
+    showPauseOverlay();
   }
 
-  function setStatus(text) {
-    statusValue.textContent = text;
+  function resumeGame() {
+    if (GAME.state !== GAME_STATE.PAUSED) return;
+    GAME.state = GAME_STATE.PLAYING;
+    hidePauseOverlay();
+    
+    const now = performance.now();
+    GAME.lastFrameTime = now;
+    GAME.lastSecondTime = now;
+    
+    GAME.animationId = requestAnimationFrame(gameLoop);
+  }
+
+  function endGame(byTimeout = false) {
+    GAME.state = GAME_STATE.ENDED;
+    cancelAnimationFrame(GAME.animationId);
+    showGameOverOverlay(byTimeout);
   }
 
   function updateHud() {
     scoreValue.textContent = String(GAME.score);
     livesValue.textContent = String(GAME.lives);
     timeValue.textContent = `${GAME.timeLeft}s`;
-    levelValue.textContent = String(GAME.level);
+    comboValue.textContent = `${GAME.combo}x`;
+    coinsValue.textContent = String(GAME.coins);
+
+    const phaseConfig = getPhaseConfig();
+    levelValue.textContent = phaseConfig.displayName;
   }
 
   function updateSkillUI() {
@@ -379,6 +624,15 @@
       skillClearCooldown.style.height = "0%";
       skillClearButton.classList.remove("on-cooldown");
     }
+
+    skillDashLevel.textContent = `Lv.${GAME.skills.dash.level}`;
+    skillClearLevel.textContent = `Lv.${GAME.skills.clearBombs.level}`;
+
+    const upgradeCost = Math.floor(
+      CONFIG.skillUpgradeCost.base * 
+      Math.pow(CONFIG.skillUpgradeCost.multiplier, Math.max(GAME.skills.dash.level, GAME.skills.clearBombs.level) - 1)
+    );
+    upgradeCostDisplay.textContent = `${upgradeCost}💰`;
   }
 
   function updatePowerUpUI() {
@@ -404,6 +658,57 @@
     powerUpStatus.innerHTML = html;
   }
 
+  function getUpgradeCost(skillLevel) {
+    return Math.floor(
+      CONFIG.skillUpgradeCost.base * 
+      Math.pow(CONFIG.skillUpgradeCost.multiplier, skillLevel - 1)
+    );
+  }
+
+  function upgradeSkill(skillKey) {
+    const skill = GAME.skills[skillKey];
+    if (!skill) return false;
+
+    const cost = getUpgradeCost(skill.level);
+    if (GAME.coins < cost) return false;
+
+    GAME.coins -= cost;
+    skill.level += 1;
+
+    if (skillKey === "dash") {
+      CONFIG.dashSpeed = 800 + (skill.level - 1) * 100;
+      CONFIG.dashDuration = 300 + (skill.level - 1) * 50;
+    } else if (skillKey === "clearBombs") {
+      CONFIG.skillCooldowns.clearBombs = Math.max(8000, 15000 - (skill.level - 1) * 2000);
+    }
+
+    updateHud();
+    updateSkillUI();
+    return true;
+  }
+
+  function showUpgradeDialog() {
+    const dashLevel = GAME.skills.dash.level;
+    const clearLevel = GAME.skills.clearBombs.level;
+    const dashCost = getUpgradeCost(dashLevel);
+    const clearCost = getUpgradeCost(clearLevel);
+
+    document.getElementById("dash-current-level").textContent = dashLevel;
+    document.getElementById("clear-current-level").textContent = clearLevel;
+    document.getElementById("dash-upgrade-cost").textContent = `${dashCost}💰`;
+    document.getElementById("clear-upgrade-cost").textContent = `${clearCost}💰`;
+
+    const dashOption = upgradeOptions.querySelector('[data-skill="dash"]');
+    const clearOption = upgradeOptions.querySelector('[data-skill="clear"]');
+
+    dashOption.disabled = GAME.coins < dashCost;
+    clearOption.disabled = GAME.coins < clearCost;
+
+    if (typeof upgradeDialog.showModal === "function") {
+      upgradeDialog.showModal();
+    }
+  }
+
   function useDash() {
     const now = performance.now();
     if (GAME.skills.dash.cooldownEnd > now || GAME.state !== GAME_STATE.PLAYING) return;
@@ -425,11 +730,29 @@
     GAME.skills.clearBombs.cooldownEnd = now + CONFIG.skillCooldowns.clearBombs;
     GAME.skills.clearBombs.lastUsed = now;
 
+    const clearLevel = GAME.skills.clearBombs.level;
+
     GAME.items = GAME.items.filter(item => {
       if (item.type === ITEM_TYPES.BOMB) {
         for (let i = 0; i < 15; i++) {
           GAME.particles.push(createParticle(item.x, item.y, "#ff5f5f", "explosion"));
         }
+        if (clearLevel >= 2) {
+          GAME.score += 5;
+        }
+        return false;
+      }
+      return true;
+    });
+
+    GAME.enemies = GAME.enemies.filter(enemy => {
+      if (clearLevel >= 3) {
+        for (let i = 0; i < 20; i++) {
+          GAME.particles.push(createParticle(enemy.x, enemy.y, "#ff5f5f", "explosion"));
+        }
+        GAME.score += enemy.points;
+        GAME.coins += Math.floor(enemy.coins / 2);
+        GAME.enemiesDefeated += 1;
         return false;
       }
       return true;
@@ -442,7 +765,7 @@
     
     if (GAME.powerUps[type]) {
       GAME.powerUps[type].active = true;
-      GAME.powerUps[type].endTime = now + duration;
+      GAME.powerUps[type].endTime = Math.max(GAME.powerUps[type].endTime, now) + duration;
     }
 
     sendSessionUpdate("powerUpUsed");
@@ -498,6 +821,8 @@
         scoreGain = CONFIG.goldenFishScore;
         GAME.combo += 2;
         GAME.itemsCaught.golden++;
+        GAME.coins += CONFIG.goldenCoins;
+        GAME.coinsEarned += CONFIG.goldenCoins;
         sendSessionUpdate("itemCaught", "golden");
         break;
       case ITEM_TYPES.BOMB:
@@ -505,6 +830,7 @@
           GAME.lives -= 1;
           GAME.combo = 0;
           GAME.itemsCaught.bomb++;
+          shakeScreen();
           sendSessionUpdate("itemCaught", "bomb");
         }
         break;
@@ -524,6 +850,14 @@
 
     if (GAME.combo > GAME.maxCombo) {
       GAME.maxCombo = GAME.combo;
+      if (GAME.combo >= 5 && GAME.combo % 5 === 0) {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = CONFIG.width / rect.width;
+        const scaleY = CONFIG.height / rect.height;
+        const popupX = (GAME.player.x / scaleX) + rect.left;
+        const popupY = (GAME.player.y / scaleY) + rect.top - 50;
+        showComboPopup(GAME.combo, popupX, popupY);
+      }
     }
 
     if (scoreGain > 0) {
@@ -535,15 +869,67 @@
     updateHud();
   }
 
+  function handleEnemyCollision(enemy) {
+    for (let i = 0; i < 12; i++) {
+      GAME.particles.push(createParticle(enemy.x, enemy.y, "#ff5f5f", "explosion"));
+    }
+
+    if (GAME.player.isDashing || GAME.skills.dash.level >= 3) {
+      GAME.score += enemy.points;
+      GAME.coins += enemy.coins;
+      GAME.coinsEarned += enemy.coins;
+      GAME.enemiesDefeated += 1;
+    } else if (!GAME.powerUps.shield.active) {
+      GAME.lives -= enemy.damage;
+      GAME.combo = 0;
+      shakeScreen();
+    } else {
+      GAME.enemiesDefeated += 1;
+    }
+
+    updateHud();
+  }
+
+  function updatePhase() {
+    const totalTimePassed = CONFIG.baseDuration - GAME.timeLeft;
+    
+    let newPhase = 1;
+    if (totalTimePassed >= PHASE_CONFIG[1].duration + PHASE_CONFIG[2].duration) {
+      newPhase = 3;
+    } else if (totalTimePassed >= PHASE_CONFIG[1].duration) {
+      newPhase = 2;
+    }
+
+    if (newPhase !== GAME.phase) {
+      GAME.phase = newPhase;
+      GAME.phaseTimeLeft = PHASE_CONFIG[newPhase].duration;
+      
+      for (let i = 0; i < 30; i++) {
+        GAME.particles.push(createParticle(
+          CONFIG.width / 2 + (Math.random() - 0.5) * 200,
+          CONFIG.height / 2 + (Math.random() - 0.5) * 100,
+          newPhase === 2 ? "#ffd166" : "#ff5f5f",
+          "explosion"
+        ));
+      }
+
+      updateHud();
+    }
+  }
+
   function update(deltaSeconds) {
     const now = performance.now();
     const player = GAME.player;
+    const phaseConfig = getPhaseConfig();
 
     if (GAME.player.isDashing && now > GAME.player.dashEndTime) {
       GAME.player.isDashing = false;
     }
 
-    const currentSpeed = player.isDashing ? CONFIG.dashSpeed : player.speed;
+    const dashLevel = GAME.skills.dash.level;
+    const currentDashSpeed = CONFIG.dashSpeed + (dashLevel - 1) * 50;
+    const currentDashDuration = CONFIG.dashDuration + (dashLevel - 1) * 50;
+    const currentSpeed = player.isDashing ? currentDashSpeed : player.speed;
     
     if (GAME.keys.left) {
       player.x -= currentSpeed * deltaSeconds;
@@ -554,16 +940,13 @@
 
     player.x = Math.max(player.width / 2, Math.min(CONFIG.width - player.width / 2, player.x));
 
-    const timeProgress = 1 - (GAME.timeLeft / CONFIG.baseDuration);
-    const currentLevel = Math.floor(timeProgress * 3) + 1;
-    if (currentLevel !== GAME.level) {
-      GAME.level = currentLevel;
-      updateHud();
-    }
+    updatePhase();
 
     const spawnInterval = Math.max(
-      CONFIG.minSpawnInterval,
-      CONFIG.baseSpawnInterval - timeProgress * (CONFIG.baseSpawnInterval - CONFIG.minSpawnInterval)
+      phaseConfig.minSpawnInterval,
+      phaseConfig.baseSpawnInterval - 
+        (1 - GAME.phaseTimeLeft / phaseConfig.duration) * 
+        (phaseConfig.baseSpawnInterval - phaseConfig.minSpawnInterval)
     );
 
     GAME.spawnAccumulator += deltaSeconds * 1000;
@@ -572,10 +955,22 @@
       spawnItem();
     }
 
+    GAME.enemySpawnAccumulator += deltaSeconds * 1000;
+    if (GAME.enemySpawnAccumulator >= phaseConfig.enemySpawnInterval && phaseConfig.enemyChance > 0) {
+      GAME.enemySpawnAccumulator = 0;
+      if (Math.random() < phaseConfig.enemyChance) {
+        spawnEnemy();
+      }
+    }
+
     if (GAME.powerUps.slowTime.active && now > GAME.powerUps.slowTime.endTime) {
       GAME.powerUps.slowTime.active = false;
       GAME.items.forEach(item => {
         item.speed = item.baseSpeed;
+      });
+      GAME.enemies.forEach(enemy => {
+        enemy.speed = enemy.baseSpeed;
+        enemy.horizontalSpeed = enemy.baseHorizontalSpeed;
       });
     }
 
@@ -585,9 +980,10 @@
           const dx = player.x - item.x;
           const dy = player.y - item.y;
           const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist > 1 && dist < 200) {
-            item.x += (dx / dist) * 200 * deltaSeconds;
-            item.y += (dy / dist) * 100 * deltaSeconds;
+          if (dist > 1 && dist < 250) {
+            const magnetStrength = 1 + (GAME.phase - 1) * 0.5;
+            item.x += (dx / dist) * 250 * magnetStrength * deltaSeconds;
+            item.y += (dy / dist) * 150 * magnetStrength * deltaSeconds;
           }
         }
       });
@@ -618,7 +1014,7 @@
         if (GAME.lives <= 0) {
           GAME.lives = 0;
           updateHud();
-          endGame();
+          endGame(false);
         }
 
         return false;
@@ -629,15 +1025,53 @@
           if (!GAME.powerUps.shield.active) {
             GAME.lives -= 1;
             GAME.combo = 0;
+            shakeScreen();
           }
           updateHud();
           if (GAME.lives <= 0) {
             GAME.lives = 0;
             updateHud();
-            endGame();
+            endGame(false);
           }
         }
 
+        return false;
+      }
+
+      return true;
+    });
+
+    GAME.enemies = GAME.enemies.filter((enemy) => {
+      const speedMultiplier = GAME.powerUps.slowTime.active ? 0.5 : 1;
+      
+      enemy.y += enemy.baseSpeed * speedMultiplier * deltaSeconds;
+      enemy.x += enemy.horizontalSpeed * speedMultiplier * deltaSeconds;
+      enemy.wobble += deltaSeconds * 3;
+      enemy.rotation += deltaSeconds * 2;
+
+      if (enemy.x < -60 || enemy.x > CONFIG.width + 60) {
+        return false;
+      }
+
+      const caught =
+        enemy.x + enemy.radius > playerBox.left &&
+        enemy.x - enemy.radius < playerBox.right &&
+        enemy.y + enemy.radius > playerBox.top &&
+        enemy.y - enemy.radius < playerBox.bottom;
+
+      if (caught) {
+        handleEnemyCollision(enemy);
+
+        if (GAME.lives <= 0) {
+          GAME.lives = 0;
+          updateHud();
+          endGame(false);
+        }
+
+        return false;
+      }
+
+      if (enemy.y - enemy.radius > CONFIG.height) {
         return false;
       }
 
@@ -747,7 +1181,7 @@
       ctx.strokeStyle = "rgba(122, 231, 199, 0.6)";
       ctx.lineWidth = 3;
       ctx.beginPath();
-      ctx.arc(0, 0, player.width / 2 + 10, 0, Math.PI * 2);
+      ctx.arc(0, 0, player.width / 2 + 15, 0, Math.PI * 2);
       ctx.stroke();
     }
 
@@ -759,24 +1193,41 @@
     if (player.isDashing) {
       ctx.shadowColor = "#ffd166";
       ctx.shadowBlur = 25;
+      
+      for (let i = 1; i <= 3; i++) {
+        ctx.globalAlpha = 0.3 - i * 0.08;
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.ellipse(-i * 20, 0, player.width / 2 - i * 5, player.height / 2 - i * 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
     }
 
-    ctx.fillStyle = "#1b1b1b";
+    ctx.fillStyle = "#ff8c42";
     ctx.beginPath();
     ctx.ellipse(0, 0, player.width / 2, player.height / 2, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    ctx.fillStyle = "#1b1b1b";
     ctx.beginPath();
-    ctx.moveTo(-24, -18);
-    ctx.lineTo(-8, -40);
-    ctx.lineTo(0, -16);
+    ctx.moveTo(-15, -10);
+    ctx.lineTo(-5, -25);
+    ctx.lineTo(5, -10);
     ctx.closePath();
     ctx.fill();
 
     ctx.beginPath();
-    ctx.moveTo(24, -18);
-    ctx.lineTo(8, -40);
-    ctx.lineTo(0, -16);
+    ctx.moveTo(15, -10);
+    ctx.lineTo(5, -25);
+    ctx.lineTo(-5, -10);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-5, -5);
+    ctx.lineTo(0, 15);
+    ctx.lineTo(5, -5);
     ctx.closePath();
     ctx.fill();
 
@@ -785,10 +1236,16 @@
     ctx.ellipse(0, 8, 24, 16, 0, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = "#ffd166";
+    ctx.fillStyle = "#1b1b1b";
     ctx.beginPath();
-    ctx.arc(-14, -6, 5, 0, Math.PI * 2);
+    ctx.ellipse(-14, -6, 5, 5, 0, 0, Math.PI * 2);
     ctx.arc(14, -6, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(-15, -8, 2, 0, Math.PI * 2);
+    ctx.arc(13, -8, 2, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.strokeStyle = "#fff4da";
@@ -804,7 +1261,7 @@
     ctx.lineTo(32, 14);
     ctx.stroke();
 
-    ctx.fillStyle = "#f08d57";
+    ctx.fillStyle = "#ff5f5f";
     ctx.beginPath();
     ctx.moveTo(0, 2);
     ctx.lineTo(-5, 10);
@@ -851,11 +1308,16 @@
     ctx.arc(0, 0, item.radius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.strokeStyle = "#ff5f5f";
+    ctx.fillStyle = "#2a2a36";
+    ctx.beginPath();
+    ctx.arc(-5, -5, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#8b4513";
     ctx.lineWidth = 4;
     ctx.beginPath();
     ctx.moveTo(0, -18);
-    ctx.lineTo(10, -28);
+    ctx.quadraticCurveTo(8, -25, 10, -28);
     ctx.stroke();
 
     const time = performance.now() / 1000;
@@ -864,6 +1326,11 @@
     ctx.fillStyle = `rgba(255, 183, 3, ${0.5 + sparkle * 0.5})`;
     ctx.beginPath();
     ctx.arc(12, -30, 5, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = `rgba(255, 100, 0, ${0.3 + sparkle * 0.3})`;
+    ctx.beginPath();
+    ctx.arc(12, -30, 8, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.restore();
@@ -885,18 +1352,23 @@
       [ITEM_TYPES.SLOW_TIME]: "#ffd166"
     };
 
+    ctx.fillStyle = `rgba(0, 0, 0, 0.3)`;
+    ctx.beginPath();
+    ctx.arc(2, 2, item.radius, 0, Math.PI * 2);
+    ctx.fill();
+
     ctx.fillStyle = colors[item.type] || "#fff";
     ctx.beginPath();
     ctx.arc(0, 0, item.radius, 0, Math.PI * 2);
     ctx.fill();
 
-    ctx.fillStyle = "rgba(0, 0, 0, 0.3)";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.3)";
     ctx.beginPath();
-    ctx.arc(0, 0, item.radius * 0.7, 0, Math.PI * 2);
+    ctx.arc(-4, -4, item.radius * 0.4, 0, Math.PI * 2);
     ctx.fill();
 
     ctx.fillStyle = "#fff";
-    ctx.font = `${item.radius}px Arial`;
+    ctx.font = `bold ${item.radius * 1.2}px Arial`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
     
@@ -907,6 +1379,123 @@
       [ITEM_TYPES.SLOW_TIME]: "⏱"
     };
     ctx.fillText(icons[item.type] || "★", 0, 0);
+
+    ctx.restore();
+  }
+
+  function drawEnemy(enemy) {
+    ctx.save();
+    ctx.translate(enemy.x, enemy.y);
+
+    const time = performance.now() / 1000;
+    const wobble = Math.sin(enemy.wobble) * 5;
+    
+    switch (enemy.type) {
+      case ENEMY_TYPES.UFO:
+        ctx.fillStyle = "#8b5cf6";
+        ctx.beginPath();
+        ctx.ellipse(0, wobble * 0.3, enemy.radius, enemy.radius * 0.5, 0, 0, Math.PI * 2);
+        ctx.fill();
+        
+        ctx.fillStyle = "#a78bfa";
+        ctx.beginPath();
+        ctx.arc(0, wobble * 0.3 - 5, enemy.radius * 0.6, Math.PI, 0);
+        ctx.fill();
+
+        ctx.fillStyle = "#ffd166";
+        for (let i = 0; i < 4; i++) {
+          const angle = (i / 4) * Math.PI * 2 + time * 2;
+          const x = Math.cos(angle) * enemy.radius * 0.8;
+          const y = Math.sin(angle) * enemy.radius * 0.2 + wobble * 0.3;
+          ctx.beginPath();
+          ctx.arc(x, y + 5, 3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        break;
+
+      case ENEMY_TYPES.BIRD:
+        ctx.rotate(enemy.rotation * 0.5);
+        
+        ctx.fillStyle = "#3b82f6";
+        ctx.beginPath();
+        ctx.ellipse(0, 0, enemy.radius, enemy.radius * 0.6, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        const wingAngle = Math.sin(time * 10) * 0.5;
+        ctx.fillStyle = "#60a5fa";
+        ctx.save();
+        ctx.rotate(wingAngle);
+        ctx.beginPath();
+        ctx.ellipse(-enemy.radius * 0.8, -5, enemy.radius * 0.5, enemy.radius * 0.3, -0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.save();
+        ctx.rotate(-wingAngle);
+        ctx.beginPath();
+        ctx.ellipse(-enemy.radius * 0.8, 5, enemy.radius * 0.5, enemy.radius * 0.3, 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        ctx.fillStyle = "#ffd166";
+        ctx.beginPath();
+        ctx.moveTo(enemy.radius * 0.8, 0);
+        ctx.lineTo(enemy.radius * 1.3, -3);
+        ctx.lineTo(enemy.radius * 1.3, 3);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(enemy.radius * 0.3, -3, 4, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.arc(enemy.radius * 0.35, -3, 2, 0, Math.PI * 2);
+        ctx.fill();
+        break;
+
+      case ENEMY_TYPES.GHOST:
+        const floatY = Math.sin(time * 3) * 5;
+        
+        ctx.globalAlpha = 0.8;
+        ctx.fillStyle = "#e0e0e0";
+        ctx.beginPath();
+        ctx.arc(0, floatY, enemy.radius, Math.PI, 0);
+        ctx.lineTo(enemy.radius, floatY + enemy.radius * 0.8);
+        
+        for (let i = 0; i < 4; i++) {
+          const waveX = enemy.radius - (i * enemy.radius * 0.5);
+          const waveY = floatY + enemy.radius * 0.8 + Math.sin(time * 5 + i) * 5;
+          if (i === 0) {
+            ctx.lineTo(waveX, waveY);
+          } else {
+            ctx.quadraticCurveTo(waveX + enemy.radius * 0.25, waveY - 8, waveX, waveY);
+          }
+        }
+        ctx.lineTo(-enemy.radius, floatY + enemy.radius * 0.8);
+        ctx.closePath();
+        ctx.fill();
+
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#000";
+        ctx.beginPath();
+        ctx.ellipse(-8, floatY - 2, 5, 7, 0, 0, Math.PI * 2);
+        ctx.ellipse(8, floatY - 2, 5, 7, 0, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#fff";
+        ctx.beginPath();
+        ctx.arc(-9, floatY - 4, 2, 0, Math.PI * 2);
+        ctx.arc(7, floatY - 4, 2, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.fillStyle = "#333";
+        ctx.beginPath();
+        ctx.ellipse(0, floatY + 8, 6, 4, 0, 0, Math.PI);
+        ctx.fill();
+        break;
+    }
 
     ctx.restore();
   }
@@ -927,6 +1516,12 @@
           drawPowerUp(item);
           break;
       }
+    });
+  }
+
+  function drawEnemies() {
+    GAME.enemies.forEach((enemy) => {
+      drawEnemy(enemy);
     });
   }
 
@@ -953,6 +1548,7 @@
     drawBackground();
     drawGroundDetails();
     drawItems();
+    drawEnemies();
     drawParticles();
     drawCat(GAME.player);
   }
@@ -980,14 +1576,16 @@
     if (elapsedSinceLastSecond >= 1000) {
       const secondsPassed = Math.floor(elapsedSinceLastSecond / 1000);
       GAME.timeLeft = Math.max(0, GAME.timeLeft - secondsPassed);
+      GAME.phaseTimeLeft = Math.max(0, GAME.phaseTimeLeft - secondsPassed);
       GAME.lastSecondTime += secondsPassed * 1000;
       
+      sendSessionUpdate("heartbeat");
       updateHud();
 
       if (GAME.timeLeft <= 0) {
         GAME.timeLeft = 0;
         updateHud();
-        endGame();
+        endGame(true);
         return;
       }
     }
@@ -1034,7 +1632,7 @@
       const entries = data.leaderboard || [];
 
       if (!entries.length) {
-        leaderboardList.innerHTML = "<li>还没有记录，去拿第一名。</li>";
+        leaderboardList.innerHTML = "<li>还没有记录，去拿第一名吧！</li>";
         return;
       }
 
@@ -1042,7 +1640,7 @@
         .map(
           (entry) => `
             <li>
-              <div class="leaderboard-rank">#${entry.rank}</div>
+              <div class="leaderboard-rank rank-${entry.rank}">#${entry.rank}</div>
               <div>
                 <span class="leaderboard-name">${escapeHtml(entry.name)}</span>
                 <span class="leaderboard-date">${formatDate(entry.createdAt)}</span>
@@ -1091,6 +1689,14 @@
     await loadLeaderboard();
   }
 
+  function openScoreSubmitDialog() {
+    finalScoreText.textContent = `你的得分：${GAME.score}`;
+    playerNameInput.value = "";
+    if (typeof scoreDialog.showModal === "function" && !GAME.submittedScore) {
+      scoreDialog.showModal();
+    }
+  }
+
   function onKeyChange(event, pressed) {
     if (event.key === "ArrowLeft" || event.key.toLowerCase() === "a") {
       GAME.keys.left = pressed;
@@ -1108,8 +1714,20 @@
       useClearBombs();
     }
 
+    if (pressed && (event.key.toLowerCase() === "p" || event.key === "Escape")) {
+      if (GAME.state === GAME_STATE.PLAYING) {
+        pauseGame();
+      } else if (GAME.state === GAME_STATE.PAUSED) {
+        resumeGame();
+      }
+    }
+
     if (pressed && event.code === "Space" && GAME.state !== GAME_STATE.PLAYING) {
-      void startGame();
+      if (GAME.state === GAME_STATE.PAUSED) {
+        resumeGame();
+      } else {
+        void startGame();
+      }
     }
   }
 
@@ -1188,8 +1806,40 @@
     }
   });
 
+  overlayStartButton.addEventListener("click", () => {
+    if (GAME.state !== GAME_STATE.PLAYING) {
+      void startGame();
+    }
+  });
+
   refreshButton.addEventListener("click", () => {
     loadLeaderboard();
+  });
+
+  resumeButton.addEventListener("click", () => {
+    resumeGame();
+  });
+
+  quitButton.addEventListener("click", () => {
+    void closeSession();
+    hidePauseOverlay();
+    resetGame();
+  });
+
+  playAgainButton.addEventListener("click", () => {
+    void startGame();
+  });
+
+  submitScoreButton.addEventListener("click", () => {
+    openScoreSubmitDialog();
+  });
+
+  pauseButton.addEventListener("click", () => {
+    if (GAME.state === GAME_STATE.PLAYING) {
+      pauseGame();
+    } else if (GAME.state === GAME_STATE.PAUSED) {
+      resumeGame();
+    }
   });
 
   skillDashButton.addEventListener("click", () => {
@@ -1198,6 +1848,28 @@
 
   skillClearButton.addEventListener("click", () => {
     useClearBombs();
+  });
+
+  skillUpgradeButton.addEventListener("click", () => {
+    if (GAME.state === GAME_STATE.PLAYING) {
+      showUpgradeDialog();
+    }
+  });
+
+  upgradeOptions.addEventListener("click", (e) => {
+    const option = e.target.closest('[data-skill]');
+    if (option && !option.disabled) {
+      const skillKey = option.dataset.skill;
+      if (upgradeSkill(skillKey)) {
+        showUpgradeDialog();
+      }
+    }
+  });
+
+  closeUpgradeButton.addEventListener("click", () => {
+    if (typeof upgradeDialog.close === "function") {
+      upgradeDialog.close();
+    }
   });
 
   scoreForm.addEventListener("submit", async (event) => {
