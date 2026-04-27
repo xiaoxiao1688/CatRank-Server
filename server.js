@@ -169,9 +169,9 @@ async function writeScores(scores) {
   try {
     await fsp.rename(tempPath, SCORES_FILE);
   } catch (renameError) {
-    if (renameError.code === "EPERM" || renameError.code === "EEXIST") {
+    if (renameError.code === "EPERM" || renameError.code === "EEXIST" || renameError.code === "EACCES") {
       try {
-        await fsp.copyFile(tempPath, SCORES_FILE, fs.constants.COPYFILE_FICLONE_FORCE);
+        await fsp.copyFile(tempPath, SCORES_FILE);
         await fsp.unlink(tempPath);
       } catch (copyError) {
         try {
