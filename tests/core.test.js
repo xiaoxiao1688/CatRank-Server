@@ -15,6 +15,14 @@ async function cleanTestData() {
   }
 }
 
+function createEventClock(startAt = Date.now()) {
+  let current = startAt;
+  return function nextEventTime(stepMs = 15) {
+    current += stepMs;
+    return current;
+  };
+}
+
 test.before(async () => {
   process.env.DATA_DIR = TEST_DATA_DIR;
   await cleanTestData();
@@ -219,13 +227,14 @@ test("leaderboard entry contains all required fields", async () => {
   
   const sessionService = createSessionService();
   const leaderboardService = createLeaderboardService();
+  const nextEventTime = createEventClock();
 
   let session = await sessionService.createSession({ playerName: "ScoreCat" });
   session = await sessionService.startSession(session.id);
-  await sessionService.addEvent(session.id, { type: "fish_caught" });
-  await sessionService.addEvent(session.id, { type: "golden_fish_caught" });
-  await sessionService.addEvent(session.id, { type: "enemy_defeated" });
-  await sessionService.addEvent(session.id, { type: "bomb_hit" });
+  await sessionService.addEvent(session.id, { type: "fish_caught", occurredAt: nextEventTime() });
+  await sessionService.addEvent(session.id, { type: "golden_fish_caught", occurredAt: nextEventTime() });
+  await sessionService.addEvent(session.id, { type: "enemy_defeated", occurredAt: nextEventTime() });
+  await sessionService.addEvent(session.id, { type: "bomb_hit", occurredAt: nextEventTime() });
   session = await sessionService.finishSession(session.id);
 
   const result = await leaderboardService.getLeaderboardPage({ page: 1, pageSize: 10 });
@@ -254,10 +263,14 @@ test("leaderboard pagination works correctly", async () => {
   const leaderboardService = createLeaderboardService();
 
   for (let i = 0; i < 5; i++) {
+    const nextEventTime = createEventClock(Date.now() + i * 1000);
     let session = await sessionService.createSession({ playerName: `Player${i}` });
     session = await sessionService.startSession(session.id);
     for (let j = 0; j <= i; j++) {
-      await sessionService.addEvent(session.id, { type: "fish_caught" });
+      await sessionService.addEvent(session.id, {
+        type: "fish_caught",
+        occurredAt: nextEventTime()
+      });
     }
     session = await sessionService.finishSession(session.id);
   }

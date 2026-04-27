@@ -1,4 +1,5 @@
 const fsp = require("fs/promises");
+const path = require("path");
 
 const { LOCK_RETRY_MS, LOCK_TIMEOUT_MS } = require("../config");
 
@@ -6,9 +7,16 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function ensureDirForPath(filePath) {
+  const dir = path.dirname(filePath);
+  await fsp.mkdir(dir, { recursive: true });
+}
+
 async function withFileLock(targetPath, callback) {
   const lockPath = `${targetPath}.lock`;
   const startedAt = Date.now();
+
+  await ensureDirForPath(lockPath);
 
   while (Date.now() - startedAt < LOCK_TIMEOUT_MS) {
     try {
