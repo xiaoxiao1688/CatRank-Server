@@ -19,9 +19,13 @@ const SESSION_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const SESSION_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const MIN_SESSION_AGE_MS = 5000;
 const MAX_SESSION_AGE_MS = 5 * 60 * 1000;
-const SCORE_PER_FISH_MIN = 8;
-const SCORE_PER_GOLDEN_MIN = 20;
+const BASE_SCORE_FISH = 10;
+const BASE_SCORE_GOLDEN = 25;
+const BASE_SCORE_ENEMY_MIN = 15;
+const BASE_SCORE_BOMB_CLEARED = 5;
 const MAX_BOMBS_POSSIBLE = 50;
+const MAX_ENEMIES_POSSIBLE = 30;
+const MAX_BOMBS_CLEARED_POSSIBLE = 20;
 
 const GAME_CONFIG = {
   title: "Cat Snack Dash",
@@ -159,15 +163,42 @@ async function readScores() {
 }
 
 async function writeScores(scores) {
+  const tempPath = `${SCORES_FILE}.${process.pid}.${Date.now()}.tmp`;
+  await fsp.writeFile(tempPath, `${JSON.stringify(scores, null, 2)}\n`, "utf8");
+  
+  try {
+    await fsp.rename(tempPath, SCORES_FILE);
+  } catch (renameError) {
+    if (renameError.code === "EPERM" || renameError.code === "EEXIST") {
+      try {
+        await fsp.copyFile(tempPath, SCORES_FILE, fs.constants.COPYFILE_FICLONE_FORCE);
+        await fsp.unlink(tempPath);
+      } catch (copyError) {
+        try {
+          await fsp.unlink(tempPath);
+        } catch (e) {}
+        throw copyError;
+      }
+    } else {
+      try {
+        await fsp.unlink(tempPath);
+      } catch (e) {}
+      throw renameError;
+    }
+  }
+}
+
+async function addScoreAtomically(newEntry) {
   const lockAcquired = await acquireLock();
   if (!lockAcquired) {
     throw new Error("Failed to acquire score lock");
   }
 
   try {
-    const tempPath = `${SCORES_FILE}.${process.pid}.${Date.now()}.tmp`;
-    await fsp.writeFile(tempPath, `${JSON.stringify(scores, null, 2)}\n`, "utf8");
-    await fsp.rename(tempPath, SCORES_FILE);
+    const scores = await readScores();
+    scores.push(newEntry);
+    await writeScores(scores);
+    return scores;
   } finally {
     await releaseLock();
   }
@@ -212,6 +243,8 @@ function createSession() {
     lastActivityAt: now,
     analytics: {
       itemsCaught: { fish: 0, golden: 0, bomb: 0 },
+      enemiesDefeated: 0,
+      bombsCleared: 0,
       powerUpsUsed: 0
     }
   };
@@ -286,34 +319,39 @@ function validateScore(score, session) {
     };
   }
 
-  const items = session.analytics?.itemsCaught || { fish: 0, golden: 0, bomb: 0 };
-  
-  const minExpectedScore = items.fish * SCORE_PER_FISH_MIN + items.golden * SCORE_PER_GOLDEN_MIN;
-  const maxExpectedScore = items.fish * GAME_CONFIG.fishScore * 2 * 2 + items.golden * GAME_CONFIG.goldenFishScore * 2 * 2;
+  const analytics = session.analytics || {};
+  const items = analytics.itemsCaught || { fish: 0, golden: 0, bomb: 0 };
+  const enemiesDefeated = analytics.enemiesDefeated || 0;
+  const bombsCleared = analytics.bombsCleared || 0;
 
-  if (score < minExpectedScore) {
-    return {
-      valid: false,
-      reason: `Score too low for collected items (${score} < ${minExpectedScore})`
-    };
+  const totalItems = items.fish + items.golden + items.bomb;
+  const hasAnyActivity = totalItems > 0 || enemiesDefeated > 0;
+
+  if (score > 0 && !hasAnyActivity) {
+    log("WARN", `Score ${score} submitted but no activity tracked`);
   }
 
-  if (score > maxExpectedScore && score > minExpectedScore * 2) {
+  const minBaseScore = 
+    items.fish * BASE_SCORE_FISH + 
+    items.golden * BASE_SCORE_GOLDEN +
+    enemiesDefeated * BASE_SCORE_ENEMY_MIN +
+    bombsCleared * BASE_SCORE_BOMB_CLEARED;
+
+  if (hasAnyActivity && score < minBaseScore * 0.5) {
     return {
       valid: false,
-      reason: `Score too high for collected items (${score} > ${maxExpectedScore})`
+      reason: `Score too low for tracked activity (${score} < ${minBaseScore})`
     };
   }
 
   const durationSeconds = Math.min(ageMs / 1000, GAME_CONFIG.durationSeconds);
   const maxItemsPerSecond = GAME_CONFIG.maxItemsPerSecond;
-  const totalItemsCollected = items.fish + items.golden + items.bomb;
-  const maxPossibleItems = Math.floor(durationSeconds * maxItemsPerSecond * 0.7);
+  const maxPossibleItems = Math.floor(durationSeconds * maxItemsPerSecond * 1.5);
 
-  if (totalItemsCollected > maxPossibleItems + 10) {
+  if (totalItems > maxPossibleItems + 20) {
     return {
       valid: false,
-      reason: `Too many items collected (${totalItemsCollected} > ${maxPossibleItems})`
+      reason: `Too many items collected (${totalItems} > ${maxPossibleItems})`
     };
   }
 
@@ -324,9 +362,23 @@ function validateScore(score, session) {
     };
   }
 
+  if (enemiesDefeated > MAX_ENEMIES_POSSIBLE) {
+    return {
+      valid: false,
+      reason: `Too many enemies defeated (${enemiesDefeated} > ${MAX_ENEMIES_POSSIBLE})`
+    };
+  }
+
+  if (bombsCleared > MAX_BOMBS_CLEARED_POSSIBLE) {
+    return {
+      valid: false,
+      reason: `Too many bombs cleared (${bombsCleared} > ${MAX_BOMBS_CLEARED_POSSIBLE})`
+    };
+  }
+
   const activityDurationMs = session.lastActivityAt - session.startedAt;
-  if (activityDurationMs < durationSeconds * 0.5 && activityDurationMs > 0) {
-    log("WARN", `Suspicious activity duration: ${activityDurationMs}ms for ${durationSeconds}s game`);
+  if (activityDurationMs < durationSeconds * 0.3 && activityDurationMs > 0 && score > 100) {
+    log("WARN", `Suspicious activity: score ${score} but only ${activityDurationMs}ms activity in ${durationSeconds}s game`);
   }
 
   return { valid: true };
@@ -416,6 +468,14 @@ async function handleApi(req, res, url) {
         session.analytics.itemsCaught[body.itemType] += 1;
       }
 
+      if (body.updateType === "enemyDefeated") {
+        session.analytics.enemiesDefeated += 1;
+      }
+
+      if (body.updateType === "bombsCleared") {
+        session.analytics.bombsCleared += body.count || 1;
+      }
+
       if (body.updateType === "powerUpUsed") {
         session.analytics.powerUpsUsed += 1;
       }
@@ -456,14 +516,13 @@ async function handleApi(req, res, url) {
         });
       }
 
-      const scores = await readScores();
-      scores.push({
+      const newEntry = {
         name,
         score,
         createdAt: new Date().toISOString()
-      });
+      };
 
-      await writeScores(scores);
+      const scores = await addScoreAtomically(newEntry);
       closeSession(sessionId);
 
       return sendJson(res, 201, {

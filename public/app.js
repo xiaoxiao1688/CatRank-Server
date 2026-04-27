@@ -699,10 +699,14 @@
     document.getElementById("clear-upgrade-cost").textContent = `${clearCost}💰`;
 
     const dashOption = upgradeOptions.querySelector('[data-skill="dash"]');
-    const clearOption = upgradeOptions.querySelector('[data-skill="clear"]');
+    const clearOption = upgradeOptions.querySelector('[data-skill="clearBombs"]');
 
     dashOption.disabled = GAME.coins < dashCost;
     clearOption.disabled = GAME.coins < clearCost;
+
+    if (upgradeDialog.open) {
+      return;
+    }
 
     if (typeof upgradeDialog.showModal === "function") {
       upgradeDialog.showModal();
@@ -731,6 +735,7 @@
     GAME.skills.clearBombs.lastUsed = now;
 
     const clearLevel = GAME.skills.clearBombs.level;
+    let bombsCleared = 0;
 
     GAME.items = GAME.items.filter(item => {
       if (item.type === ITEM_TYPES.BOMB) {
@@ -740,10 +745,15 @@
         if (clearLevel >= 2) {
           GAME.score += 5;
         }
+        bombsCleared++;
         return false;
       }
       return true;
     });
+
+    if (bombsCleared > 0) {
+      sendSessionUpdate("bombsCleared", null, { count: bombsCleared });
+    }
 
     GAME.enemies = GAME.enemies.filter(enemy => {
       if (clearLevel >= 3) {
@@ -753,6 +763,7 @@
         GAME.score += enemy.points;
         GAME.coins += Math.floor(enemy.coins / 2);
         GAME.enemiesDefeated += 1;
+        sendSessionUpdate("enemyDefeated");
         return false;
       }
       return true;
@@ -771,7 +782,7 @@
     sendSessionUpdate("powerUpUsed");
   }
 
-  async function sendSessionUpdate(updateType, itemType = null) {
+  async function sendSessionUpdate(updateType, itemType = null, extraData = null) {
     if (!GAME.sessionId) return;
     
     try {
@@ -781,6 +792,9 @@
       };
       if (itemType) {
         body.itemType = itemType;
+      }
+      if (extraData && typeof extraData === "object") {
+        Object.assign(body, extraData);
       }
 
       await fetch("/api/session/update", {
@@ -879,12 +893,14 @@
       GAME.coins += enemy.coins;
       GAME.coinsEarned += enemy.coins;
       GAME.enemiesDefeated += 1;
+      sendSessionUpdate("enemyDefeated");
     } else if (!GAME.powerUps.shield.active) {
       GAME.lives -= enemy.damage;
       GAME.combo = 0;
       shakeScreen();
     } else {
       GAME.enemiesDefeated += 1;
+      sendSessionUpdate("enemyDefeated");
     }
 
     updateHud();
@@ -1617,7 +1633,9 @@
       const data = await response.json();
       CONFIG.baseDuration = data.durationSeconds ?? CONFIG.baseDuration;
       CONFIG.maxLives = data.maxLives ?? CONFIG.maxLives;
-      resetGame();
+      if (GAME.state === GAME_STATE.IDLE) {
+        resetGame();
+      }
     } catch (error) {
       console.error("Failed to load config", error);
     }
