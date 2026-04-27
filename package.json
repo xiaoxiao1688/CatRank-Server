@@ -1,6 +1,6 @@
 {
   "name": "cat-snack-dash",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "A full-stack cat arcade game with a Node backend and browser frontend.",
   "main": "server.js",
   "scripts": {

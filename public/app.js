@@ -73,6 +73,7 @@
 
   let GAME = {
     state: GAME_STATE.IDLE,
+    startingSession: false,
     sessionId: null,
     player: null,
     items: [],
@@ -257,7 +258,65 @@
     setStatus("等待开始");
   }
 
-  function startGame() {
+  async function createSession() {
+    const response = await fetch("/api/session", {
+      method: "POST"
+    });
+
+    const payload = await response.json();
+    if (!response.ok || !payload.sessionId) {
+      throw new Error(payload.message || "Failed to create session");
+    }
+
+    return payload.sessionId;
+  }
+
+  async function closeSession() {
+    if (!GAME.sessionId) {
+      return;
+    }
+
+    try {
+      await fetch("/api/session/close", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ sessionId: GAME.sessionId })
+      });
+    } catch (error) {
+      console.error("Session close failed:", error);
+    } finally {
+      GAME.sessionId = null;
+    }
+  }
+
+  async function startGame() {
+    if (GAME.state === GAME_STATE.PLAYING || GAME.startingSession) {
+      return;
+    }
+
+    GAME.startingSession = true;
+    startButton.disabled = true;
+    setStatus("准备中");
+
+    try {
+      if (GAME.sessionId) {
+        await closeSession();
+      }
+
+      GAME.sessionId = await createSession();
+    } catch (error) {
+      console.error("Failed to start session", error);
+      GAME.sessionId = null;
+      GAME.startingSession = false;
+      startButton.disabled = false;
+      setStatus("启动失败");
+      overlay.classList.remove("hidden");
+      overlayText.textContent = "无法连接到游戏服务，请重试。";
+      return;
+    }
+
     resetGame();
     GAME.state = GAME_STATE.PLAYING;
     overlay.classList.add("hidden");
@@ -267,8 +326,9 @@
     GAME.lastFrameTime = now;
     GAME.gameStartTime = now;
     GAME.lastSecondTime = now;
-    
-    sendSessionUpdate("gameStart");
+
+    GAME.startingSession = false;
+    startButton.disabled = false;
     GAME.animationId = requestAnimationFrame(gameLoop);
   }
 
@@ -400,7 +460,7 @@
         body.itemType = itemType;
       }
 
-      await fetch("/api/session-update", {
+      await fetch("/api/session/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body)
@@ -525,7 +585,7 @@
           const dx = player.x - item.x;
           const dy = player.y - item.y;
           const dist = Math.sqrt(dx * dx + dy * dy);
-          if (dist < 200) {
+          if (dist > 1 && dist < 200) {
             item.x += (dx / dist) * 200 * deltaSeconds;
             item.y += (dy / dist) * 100 * deltaSeconds;
           }
@@ -957,7 +1017,6 @@
     try {
       const response = await fetch("/api/game-config");
       const data = await response.json();
-      GAME.sessionId = data.sessionId;
       CONFIG.baseDuration = data.durationSeconds ?? CONFIG.baseDuration;
       CONFIG.maxLives = data.maxLives ?? CONFIG.maxLives;
       resetGame();
@@ -1021,11 +1080,14 @@
       })
     });
 
+    const payload = await response.json();
+
     if (!response.ok) {
-      throw new Error("Score submission failed");
+      throw new Error(payload.message || "Score submission failed");
     }
 
     GAME.submittedScore = true;
+    GAME.sessionId = null;
     await loadLeaderboard();
   }
 
@@ -1047,18 +1109,16 @@
     }
 
     if (pressed && event.code === "Space" && GAME.state !== GAME_STATE.PLAYING) {
-      startGame();
+      void startGame();
     }
   }
 
   function setupTouchControls() {
-    let touchActive = false;
+    function updateTouchDirection(touches) {
+      GAME.keys.left = false;
+      GAME.keys.right = false;
 
-    function handleTouchStart(e) {
-      e.preventDefault();
-      const touches = e.touches;
-      
-      for (let i = 0; i < touches.length; i++) {
+      for (let i = 0; i < touches.length; i += 1) {
         const touch = touches[i];
         const rect = canvas.getBoundingClientRect();
         const x = touch.clientX - rect.left;
@@ -1070,38 +1130,26 @@
           GAME.keys.right = true;
         }
       }
-      
-      touchActive = true;
+    }
+
+    function handleTouchStart(e) {
+      e.preventDefault();
+      updateTouchDirection(e.touches);
     }
 
     function handleTouchEnd(e) {
       e.preventDefault();
-      const touches = e.touches;
-      
-      if (touches.length === 0) {
+      if (e.touches.length === 0) {
         GAME.keys.left = false;
         GAME.keys.right = false;
-        touchActive = false;
       } else {
-        GAME.keys.left = false;
-        GAME.keys.right = false;
-        for (let i = 0; i < touches.length; i++) {
-          const touch = touches[i];
-          const rect = canvas.getBoundingClientRect();
-          const x = touch.clientX - rect.left;
-          const relativeX = x / rect.width;
-
-          if (relativeX < 0.5) {
-            GAME.keys.left = true;
-          } else {
-            GAME.keys.right = true;
-          }
-        }
+        updateTouchDirection(e.touches);
       }
     }
 
     function handleTouchMove(e) {
       e.preventDefault();
+      updateTouchDirection(e.touches);
     }
 
     canvas.addEventListener("touchstart", handleTouchStart, { passive: false });
@@ -1136,7 +1184,7 @@
 
   startButton.addEventListener("click", () => {
     if (GAME.state !== GAME_STATE.PLAYING) {
-      startGame();
+      void startGame();
     }
   });
 
@@ -1166,6 +1214,7 @@
 
   skipSubmitButton.addEventListener("click", () => {
     GAME.submittedScore = true;
+    void closeSession();
     scoreDialog.close();
   });
 
