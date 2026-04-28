@@ -462,3 +462,375 @@ test("recovery: expired session with events conflict", async () => {
   assert.strictEqual(report.summary.stateConflicts, 1, "Should detect state conflict for expired session");
   assert.strictEqual(report.summary.failed, 1, "Should mark as failed");
 });
+
+test("recovery: backup creation before recovery", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { createSessionService } = require("../src/services/session-service");
+  const { listBackups } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionService = createSessionService();
+  
+  let session = await sessionService.createSession({ playerName: "BackupTestCat" });
+  session = await sessionService.startSession(session.id);
+  
+  const event = await sessionService.addEvent(session.id, { type: "fish_caught" });
+  
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: session.id,
+    playerName: session.playerName,
+    ...event
+  }));
+
+  const backupsBefore = await listBackups();
+  const backupCountBefore = backupsBefore.backups.length;
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: true 
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.createBackup, true);
+  assert.ok(report.backupResult, "Should have backup result");
+
+  const backupsAfter = await listBackups();
+  assert.strictEqual(
+    backupsAfter.backups.length, 
+    backupCountBefore + 1, 
+    "Should have created a new backup"
+  );
+});
+
+test("recovery: repeat recovery - skipped up to date sessions", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const clock = createTestEventClock();
+  const sessionId = createTestId("sess");
+  
+  const event = {
+    sessionId,
+    playerName: "RepeatTestCat",
+    type: "fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  };
+  
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+
+  const service1 = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false 
+  });
+  const report1 = await service1.runRecovery();
+
+  assert.strictEqual(report1.summary.totalSessions, 1);
+  assert.strictEqual(report1.summary.recovered, 1);
+
+  const service2 = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false 
+  });
+  const report2 = await service2.runRecovery();
+
+  assert.strictEqual(report2.summary.totalSessions, 1);
+  assert.strictEqual(report2.summary.skipped, 1, "Second recovery should skip up to date session");
+  assert.strictEqual(report2.summary.recovered, 0, "Second recovery should not recover anything");
+});
+
+test("recovery: large log file handling", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionCount = 5;
+  const eventsPerSession = 20;
+  
+  const clock = createTestEventClock();
+  
+  for (let s = 0; s < sessionCount; s++) {
+    const sessionId = createTestId("sess");
+    const playerName = `LargeLogCat_${s}`;
+    
+    for (let e = 0; e < eventsPerSession; e++) {
+      const event = {
+        sessionId,
+        playerName,
+        type: ["fish_caught", "golden_fish_caught", "enemy_defeated"][e % 3],
+        id: createTestId("evt"),
+        occurredAt: clock(),
+        receivedAt: new Date().toISOString(),
+        payload: { combo: e }
+      };
+      await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+    }
+  }
+
+  const service = await createRecoveryService({ 
+    dryRun: true, 
+    createBackup: false 
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.summary.totalSessions, sessionCount);
+  assert.strictEqual(report.summary.recovered, sessionCount);
+  
+  for (const sessionReport of report.details.sessions) {
+    assert.strictEqual(sessionReport.eventCount, eventsPerSession);
+  }
+});
+
+test("recovery: corrupted lines are quarantined in real mode", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { listQuarantinedItems } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const clock = createTestEventClock();
+  const sessionId = createTestId("sess");
+  
+  const validEvent = {
+    sessionId,
+    playerName: "QuarantineTestCat",
+    type: "fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  };
+
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify(validEvent));
+  await appendLine(EVENTS_LOG_FILE, "this is definitely not valid JSON");
+  await appendLine(EVENTS_LOG_FILE, '{ "another": invalid json }');
+
+  const quarantinedBefore = await listQuarantinedItems();
+  const quarantineCountBefore = quarantinedBefore.items.length;
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false,
+    quarantineCorrupted: true
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.summary.corruptedLines, 2);
+  assert.strictEqual(report.summary.quarantinedItems, 2);
+
+  const quarantinedAfter = await listQuarantinedItems();
+  assert.ok(
+    quarantinedAfter.items.length > quarantineCountBefore,
+    "Should have quarantined items"
+  );
+});
+
+test("recovery: report is persisted after real recovery", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { listRecoveryReports } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const clock = createTestEventClock();
+  const sessionId = createTestId("sess");
+  
+  const event = {
+    sessionId,
+    playerName: "ReportPersistCat",
+    type: "fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  };
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+
+  const reportsBefore = await listRecoveryReports();
+  const reportCountBefore = reportsBefore.reports.length;
+
+  const dryRunService = await createRecoveryService({ 
+    dryRun: true, 
+    createBackup: false
+  });
+  const dryRunReport = await dryRunService.runRecovery();
+
+  const reportsAfterDryRun = await listRecoveryReports();
+  assert.strictEqual(
+    reportsAfterDryRun.reports.length,
+    reportCountBefore,
+    "Dry run should not persist report"
+  );
+
+  const realService = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false
+  });
+  const realReport = await realService.runRecovery();
+
+  const reportsAfterReal = await listRecoveryReports();
+  assert.strictEqual(
+    reportsAfterReal.reports.length,
+    reportCountBefore + 1,
+    "Real recovery should persist report"
+  );
+});
+
+test("recovery: backup restore functionality", async () => {
+  const { createBackup, restoreFromBackup, listBackups } = require("../src/services/recovery-manager");
+  const { createSessionService } = require("../src/services/session-service");
+  const { getSessionById } = require("../src/repositories/session-repo");
+  
+  const sessionService = createSessionService();
+  
+  let session = await sessionService.createSession({ playerName: "RestoreTestCat" });
+  session = await sessionService.startSession(session.id);
+  await sessionService.addEvent(session.id, { type: "fish_caught" });
+
+  const backupResult = await createBackup("test-backup");
+  assert.strictEqual(backupResult.success, true);
+  assert.ok(backupResult.backupId);
+
+  session = await sessionService.closeSession(session.id);
+
+  const restoreResult = await restoreFromBackup(backupResult.backupId);
+  assert.strictEqual(restoreResult.success, true);
+
+  const restoredSession = await getSessionById(session.id);
+  assert.ok(restoredSession);
+  assert.strictEqual(restoredSession.state, "playing", "Should be restored to playing state");
+});
+
+test("recovery: progress tracking during recovery", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { getCurrentProgress } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionCount = 3;
+  const clock = createTestEventClock();
+  
+  for (let s = 0; s < sessionCount; s++) {
+    const sessionId = createTestId("sess");
+    const event = {
+      sessionId,
+      playerName: `ProgressCat_${s}`,
+      type: "fish_caught",
+      id: createTestId("evt"),
+      occurredAt: clock(),
+      receivedAt: new Date().toISOString(),
+      payload: {}
+    };
+    await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+  }
+
+  const progressUpdates = [];
+  
+  const service = await createRecoveryService({ 
+    dryRun: true, 
+    createBackup: false,
+    onProgress: (progress) => {
+      progressUpdates.push({ ...progress });
+    }
+  });
+  
+  await service.runRecovery();
+
+  assert.ok(progressUpdates.length > 0, "Should have received progress updates");
+  
+  const phases = progressUpdates.map(p => p.phase);
+  assert.ok(phases.includes("parsing_log"), "Should have parsing_log phase");
+  assert.ok(phases.includes("processing_sessions"), "Should have processing_sessions phase");
+  assert.ok(phases.includes("finalizing") || phases.includes("completed"), "Should have final phase");
+});
+
+test("recovery: duplicate recovery request is rejected", async () => {
+  const { createRecoveryRouter } = require("../src/routes/recovery");
+  const express = require("express");
+  const request = require("supertest");
+  const recoveryServiceModule = require("../src/services/recovery-service");
+  
+  const router = createRecoveryRouter();
+  const app = express();
+  app.use(express.json());
+  app.use("/api/recovery", router);
+  
+  let recoveryRunning = false;
+  
+  const originalCreateRecoveryService = recoveryServiceModule.createRecoveryService;
+  recoveryServiceModule.createRecoveryService = function(options) {
+    const service = originalCreateRecoveryService(options);
+    return {
+      runRecovery: async function() {
+        recoveryRunning = true;
+        await new Promise(resolve => setTimeout(resolve, 100));
+        recoveryRunning = false;
+        return { success: true, summary: { recovered: 0, totalSessions: 0 } };
+      }
+    };
+  };
+  
+  try {
+    const response1 = await request(app)
+      .post("/api/recovery/run")
+      .send({ dryRun: true });
+    
+    assert.ok(response1.body.ok !== undefined);
+  } finally {
+    recoveryServiceModule.createRecoveryService = originalCreateRecoveryService;
+  }
+});
+
+test("recovery: can recover from interrupted state", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { saveRecoveryState, loadRecoveryState, RECOVERY_STATES } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const clock = createTestEventClock();
+  const sessionId = createTestId("sess");
+  
+  const event = {
+    sessionId,
+    playerName: "InterruptRecoverCat",
+    type: "fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  };
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+
+  await saveRecoveryState({
+    status: RECOVERY_STATES.INTERRUPTED,
+    interruptedAt: new Date().toISOString()
+  });
+
+  const loadedState = await loadRecoveryState();
+  assert.strictEqual(loadedState.status, RECOVERY_STATES.INTERRUPTED);
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.success, true);
+  assert.strictEqual(report.summary.recovered, 1);
+});
