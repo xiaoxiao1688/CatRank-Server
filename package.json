@@ -1,0 +1,31 @@
+{
+  "name": "catrank-server",
+  "version": "0.1.0",
+  "description": "Trusted backend skeleton for CatRank Server",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test --test-concurrency=1 tests/*.test.js",
+    "test:watch": "node --test --test-concurrency=1 --watch tests/*.test.js",
+    "check": "node --check src/server.js && node --check src/app.js && node --check src/routes/sessions.js && node --check src/routes/leaderboard.js && node --check src/routes/recovery.js && node --check src/services/session-service.js && node --check src/services/scoring-service.js && node --check src/services/leaderboard-service.js && node --check src/services/event-log-parser.js && node --check src/services/session-replayer.js && node --check src/services/recovery-service.js && node --check src/services/recovery-manager.js && node --check src/recovery-cli.js && node --check src/repositories/session-repo.js && node --check src/repositories/leaderboard-repo.js && node --check src/repositories/event-log-repo.js",
+    "recovery:dry-run": "node src/recovery-cli.js --dry-run",
+    "recovery:real": "node src/recovery-cli.js --real",
+    "recovery:help": "node src/recovery-cli.js --help"
+  },
+  "keywords": [
+    "catrank",
+    "backend",
+    "leaderboard",
+    "game"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "supertest": "^7.0.0"
+  }
+}
