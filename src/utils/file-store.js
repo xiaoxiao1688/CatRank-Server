@@ -55,10 +55,38 @@ async function readJsonSafe(filePath, fallbackValue) {
 }
 
 async function writeJsonAtomic(filePath, value) {
-  await ensureDir(path.dirname(filePath));
-  const tempPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
-  await fsp.writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await fsp.rename(tempPath, filePath);
+  const dirPath = path.dirname(filePath);
+  await ensureDir(dirPath);
+
+  const tempPath = `${filePath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+  const serialized = `${JSON.stringify(value, null, 2)}\n`;
+
+  await fsp.writeFile(tempPath, serialized, "utf8");
+
+  try {
+    await fsp.rename(tempPath, filePath);
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      await ensureDir(dirPath);
+      const tempExists = await fsp.access(tempPath).then(() => true).catch(() => false);
+
+      if (!tempExists) {
+        await fsp.writeFile(tempPath, serialized, "utf8");
+      }
+
+      await fsp.rename(tempPath, filePath);
+      return;
+    }
+
+    if (error.code === "EPERM" || error.code === "EACCES" || error.code === "EBUSY") {
+      await ensureDir(dirPath);
+      await fsp.writeFile(filePath, serialized, "utf8");
+      await fsp.unlink(tempPath).catch(() => {});
+      return;
+    }
+
+    throw error;
+  }
 }
 
 async function appendLine(filePath, line) {

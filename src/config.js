@@ -1,4 +1,5 @@
 const path = require("path");
+const crypto = require("crypto");
 
 const ROOT_DIR = path.resolve(__dirname, "..");
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(ROOT_DIR, "data");
@@ -10,6 +11,20 @@ const BACKUP_DIR = path.join(DATA_DIR, "backups");
 const QUARANTINE_DIR = path.join(DATA_DIR, "quarantine");
 const RECOVERY_REPORTS_DIR = path.join(DATA_DIR, "recovery-reports");
 const RECOVERY_STATE_FILE = path.join(DATA_DIR, "recovery-state.json");
+const RECOVERY_TEMP_DIR = path.join(DATA_DIR, "recovery-temp");
+
+function generateDefaultApiKey() {
+  return crypto.randomBytes(32).toString("hex");
+}
+
+function parseEnvBoolean(key, defaultValue) {
+  const value = process.env[key];
+  if (value === undefined || value === "") {
+    return defaultValue;
+  }
+  const lower = value.toLowerCase();
+  return lower === "true" || lower === "1" || lower === "yes";
+}
 
 function parseEnvNumber(key, defaultValue) {
   const value = process.env[key];
@@ -19,6 +34,9 @@ function parseEnvNumber(key, defaultValue) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : defaultValue;
 }
+
+const RECOVERY_API_KEY = process.env.RECOVERY_API_KEY || generateDefaultApiKey();
+const RECOVERY_REQUIRE_AUTH = parseEnvBoolean("RECOVERY_REQUIRE_AUTH", false);
 
 module.exports = {
   HOST: process.env.HOST || "127.0.0.1",
@@ -32,6 +50,9 @@ module.exports = {
   QUARANTINE_DIR,
   RECOVERY_REPORTS_DIR,
   RECOVERY_STATE_FILE,
+  RECOVERY_TEMP_DIR,
+  RECOVERY_API_KEY,
+  RECOVERY_REQUIRE_AUTH,
   SESSION_TTL_MS: parseEnvNumber("SESSION_TTL_MS", 15 * 60 * 1000),
   MAX_EVENTS_PER_SESSION: parseEnvNumber("MAX_EVENTS_PER_SESSION", 1000),
   MAX_EVENT_FUTURE_SKEW_MS: parseEnvNumber("MAX_EVENT_FUTURE_SKEW_MS", 30 * 1000),
@@ -41,5 +62,6 @@ module.exports = {
   MAX_COMBO_VALUE: parseEnvNumber("MAX_COMBO_VALUE", 100),
   MAX_EVENTS_PER_SECOND: parseEnvNumber("MAX_EVENTS_PER_SECOND", 20),
   MIN_EVENT_INTERVAL_MS: parseEnvNumber("MIN_EVENT_INTERVAL_MS", 10),
-  EVENT_FREQUENCY_WINDOW_MS: parseEnvNumber("EVENT_FREQUENCY_WINDOW_MS", 1000)
+  EVENT_FREQUENCY_WINDOW_MS: parseEnvNumber("EVENT_FREQUENCY_WINDOW_MS", 1000),
+  RECOVERY_TRANSACTION_MODE: parseEnvBoolean("RECOVERY_TRANSACTION_MODE", true)
 };

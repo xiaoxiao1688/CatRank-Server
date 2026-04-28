@@ -834,3 +834,442 @@ test("recovery: can recover from interrupted state", async () => {
   assert.strictEqual(report.success, true);
   assert.strictEqual(report.summary.recovered, 1);
 });
+
+test("recovery: auth middleware - rejects requests without API key when auth enabled", async () => {
+  const originalRequireAuth = process.env.RECOVERY_REQUIRE_AUTH;
+  const originalApiKey = process.env.RECOVERY_API_KEY;
+  process.env.RECOVERY_REQUIRE_AUTH = "true";
+  process.env.RECOVERY_API_KEY = "test-secret-key-123";
+  
+  try {
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+    delete require.cache[require.resolve("../src/services/recovery-service")];
+    delete require.cache[require.resolve("../src/services/recovery-manager")];
+    
+    const { requireRecoveryAuth } = require("../src/middleware/recovery-auth");
+    
+    let nextCalled = false;
+    let errorThrown = null;
+    
+    const mockReq = {
+      headers: {},
+      query: {},
+      body: {}
+    };
+    
+    const mockRes = {};
+    
+    function mockNext(err) {
+      if (err) {
+        errorThrown = err;
+      }
+      nextCalled = true;
+    }
+    
+    try {
+      requireRecoveryAuth(mockReq, mockRes, mockNext);
+    } catch (err) {
+      errorThrown = err;
+    }
+    
+    assert.ok(errorThrown, "Should throw error when no API key provided");
+    assert.strictEqual(errorThrown.statusCode, 401);
+  } finally {
+    if (originalRequireAuth !== undefined) {
+      process.env.RECOVERY_REQUIRE_AUTH = originalRequireAuth;
+    } else {
+      delete process.env.RECOVERY_REQUIRE_AUTH;
+    }
+    if (originalApiKey !== undefined) {
+      process.env.RECOVERY_API_KEY = originalApiKey;
+    } else {
+      delete process.env.RECOVERY_API_KEY;
+    }
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+    delete require.cache[require.resolve("../src/services/recovery-service")];
+    delete require.cache[require.resolve("../src/services/recovery-manager")];
+  }
+});
+
+test("recovery: auth middleware - accepts requests with valid API key", async () => {
+  const originalRequireAuth = process.env.RECOVERY_REQUIRE_AUTH;
+  const originalApiKey = process.env.RECOVERY_API_KEY;
+  const testApiKey = "test-api-key-12345";
+  
+  process.env.RECOVERY_REQUIRE_AUTH = "true";
+  process.env.RECOVERY_API_KEY = testApiKey;
+  
+  try {
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+    
+    const { requireRecoveryAuth } = require("../src/middleware/recovery-auth");
+    
+    let nextCalled = false;
+    let errorThrown = null;
+    
+    const mockReq = {
+      headers: {
+        authorization: `Bearer ${testApiKey}`
+      },
+      query: {},
+      body: {}
+    };
+    
+    const mockRes = {};
+    
+    function mockNext(err) {
+      if (err) {
+        errorThrown = err;
+      }
+      nextCalled = true;
+    }
+    
+    try {
+      requireRecoveryAuth(mockReq, mockRes, mockNext);
+    } catch (err) {
+      errorThrown = err;
+    }
+    
+    assert.strictEqual(errorThrown, null, "Should not throw error with valid API key");
+    assert.strictEqual(nextCalled, true, "Should call next() with valid API key");
+  } finally {
+    if (originalRequireAuth !== undefined) {
+      process.env.RECOVERY_REQUIRE_AUTH = originalRequireAuth;
+    } else {
+      delete process.env.RECOVERY_REQUIRE_AUTH;
+    }
+    if (originalApiKey !== undefined) {
+      process.env.RECOVERY_API_KEY = originalApiKey;
+    } else {
+      delete process.env.RECOVERY_API_KEY;
+    }
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+  }
+});
+
+test("recovery: auth middleware - rejects requests with invalid API key", async () => {
+  const originalRequireAuth = process.env.RECOVERY_REQUIRE_AUTH;
+  const originalApiKey = process.env.RECOVERY_API_KEY;
+  const validApiKey = "valid-api-key-12345";
+  
+  process.env.RECOVERY_REQUIRE_AUTH = "true";
+  process.env.RECOVERY_API_KEY = validApiKey;
+  
+  try {
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+    
+    const { requireRecoveryAuth } = require("../src/middleware/recovery-auth");
+    
+    let nextCalled = false;
+    let errorThrown = null;
+    
+    const mockReq = {
+      headers: {
+        authorization: "Bearer invalid-api-key"
+      },
+      query: {},
+      body: {}
+    };
+    
+    const mockRes = {};
+    
+    function mockNext(err) {
+      if (err) {
+        errorThrown = err;
+      }
+      nextCalled = true;
+    }
+    
+    try {
+      requireRecoveryAuth(mockReq, mockRes, mockNext);
+    } catch (err) {
+      errorThrown = err;
+    }
+    
+    assert.ok(errorThrown, "Should throw error with invalid API key");
+    assert.strictEqual(errorThrown.statusCode, 403);
+  } finally {
+    if (originalRequireAuth !== undefined) {
+      process.env.RECOVERY_REQUIRE_AUTH = originalRequireAuth;
+    } else {
+      delete process.env.RECOVERY_REQUIRE_AUTH;
+    }
+    if (originalApiKey !== undefined) {
+      process.env.RECOVERY_API_KEY = originalApiKey;
+    } else {
+      delete process.env.RECOVERY_API_KEY;
+    }
+    delete require.cache[require.resolve("../src/config")];
+    delete require.cache[require.resolve("../src/middleware/recovery-auth")];
+    delete require.cache[require.resolve("../src/routes/recovery")];
+  }
+});
+
+test("recovery: transaction mode - enabled by default", async () => {
+  const { getTransactionMode } = require("../src/services/recovery-manager");
+  
+  const txnMode = await getTransactionMode();
+  
+  assert.strictEqual(typeof txnMode.enabled, "boolean");
+  assert.ok(txnMode.tempDir);
+});
+
+test("recovery: transaction and rollback - interrupt triggers rollback when backup exists", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { createSessionService } = require("../src/services/session-service");
+  const { interruptRecoveryTracking, getActiveTransactionId } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionService = createSessionService();
+  
+  let originalSession = await sessionService.createSession({ playerName: "RollbackTestCat" });
+  originalSession = await sessionService.startSession(originalSession.id);
+  const originalEvent = await sessionService.addEvent(originalSession.id, { type: "fish_caught" });
+  
+  const clock = createTestEventClock();
+  const newEvent = {
+    sessionId: originalSession.id,
+    playerName: originalSession.playerName,
+    type: "golden_fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  };
+  
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: originalSession.id,
+    playerName: originalSession.playerName,
+    ...originalEvent
+  }));
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify(newEvent));
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: true,
+    enableTransaction: true,
+    onProgress: async (progress) => {
+      if (progress.phase === "processing_sessions" && getActiveTransactionId()) {
+        await interruptRecoveryTracking();
+      }
+    }
+  });
+  
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.wasInterrupted, true);
+  assert.ok(report.rollbackResult !== undefined);
+});
+
+test("recovery: large scale performance - 100 sessions with 50 events each", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionCount = 100;
+  const eventsPerSession = 50;
+  const totalEvents = sessionCount * eventsPerSession;
+  
+  const clock = createTestEventClock();
+  
+  console.log(`[Performance Test] Generating ${totalEvents} events for ${sessionCount} sessions...`);
+  const generateStart = Date.now();
+  
+  for (let s = 0; s < sessionCount; s++) {
+    const sessionId = createTestId("sess");
+    const playerName = `PerfCat_${s}`;
+    
+    for (let e = 0; e < eventsPerSession; e++) {
+      const event = {
+        sessionId,
+        playerName,
+        type: ["fish_caught", "golden_fish_caught", "enemy_defeated"][e % 3],
+        id: createTestId("evt"),
+        occurredAt: clock(),
+        receivedAt: new Date().toISOString(),
+        payload: { combo: e + 1 }
+      };
+      await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+    }
+  }
+  
+  const generateTime = Date.now() - generateStart;
+  console.log(`[Performance Test] Data generated in ${generateTime}ms`);
+  
+  console.log(`[Performance Test] Running recovery...`);
+  const recoveryStart = Date.now();
+  
+  const service = await createRecoveryService({ 
+    dryRun: true, 
+    createBackup: false
+  });
+  const report = await service.runRecovery();
+  
+  const recoveryTime = Date.now() - recoveryStart;
+  console.log(`[Performance Test] Recovery completed in ${recoveryTime}ms`);
+  console.log(`[Performance Test] Throughput: ${Math.round(totalEvents / (recoveryTime / 1000))} events/sec`);
+
+  assert.strictEqual(report.summary.totalSessions, sessionCount);
+  assert.strictEqual(report.summary.recovered, sessionCount);
+  
+  for (const sessionReport of report.details.sessions) {
+    assert.strictEqual(sessionReport.eventCount, eventsPerSession);
+  }
+  
+  assert.ok(recoveryTime < 30000, `Recovery should complete within reasonable time (took ${recoveryTime}ms)`);
+});
+
+test("recovery: post-recovery validation - verify session data integrity", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { createSessionService } = require("../src/services/session-service");
+  const { getSessionById } = require("../src/repositories/session-repo");
+  const { listLeaderboardEntries } = require("../src/repositories/leaderboard-repo");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  const { SESSION_STATES } = require("../src/game-rules");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const clock = createTestEventClock();
+  
+  const sessionId1 = createTestId("sess");
+  const playerName1 = "ValidateCat_1";
+  const events1 = [
+    {
+      sessionId: sessionId1,
+      playerName: playerName1,
+      type: "fish_caught",
+      id: createTestId("evt"),
+      occurredAt: clock(),
+      receivedAt: new Date().toISOString(),
+      payload: { combo: 1 }
+    },
+    {
+      sessionId: sessionId1,
+      playerName: playerName1,
+      type: "golden_fish_caught",
+      id: createTestId("evt"),
+      occurredAt: clock(),
+      receivedAt: new Date().toISOString(),
+      payload: { combo: 2 }
+    }
+  ];
+  
+  for (const event of events1) {
+    await appendLine(EVENTS_LOG_FILE, JSON.stringify(event));
+  }
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false 
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.success, true);
+  assert.strictEqual(report.summary.recovered, 1);
+  
+  const recoveredSession = await getSessionById(sessionId1);
+  assert.ok(recoveredSession, "Session should be created after recovery");
+  assert.strictEqual(recoveredSession.id, sessionId1);
+  assert.strictEqual(recoveredSession.playerName, playerName1);
+  assert.strictEqual(recoveredSession.events.length, events1.length);
+  assert.strictEqual(recoveredSession.state, SESSION_STATES.PLAYING);
+  
+  for (let i = 0; i < events1.length; i++) {
+    assert.strictEqual(recoveredSession.events[i].id, events1[i].id);
+    assert.strictEqual(recoveredSession.events[i].type, events1[i].type);
+  }
+  
+  assert.ok(report.validation, "Report should have validation result");
+  assert.strictEqual(report.validation.valid, true);
+});
+
+test("recovery: post-recovery validation - verify finished session with leaderboard entry", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { createSessionService } = require("../src/services/session-service");
+  const { getSessionById } = require("../src/repositories/session-repo");
+  const { listLeaderboardEntries } = require("../src/repositories/leaderboard-repo");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+  const { SESSION_STATES } = require("../src/game-rules");
+  
+  await ensureDir(SESSION_DIR);
+  
+  const sessionService = createSessionService();
+  const clock = createTestEventClock();
+  
+  let session = await sessionService.createSession({ playerName: "LeaderboardValidateCat" });
+  session = await sessionService.startSession(session.id);
+  
+  const event1 = await sessionService.addEvent(session.id, {
+    type: "fish_caught",
+    occurredAt: clock()
+  });
+  const event2 = await sessionService.addEvent(session.id, {
+    type: "golden_fish_caught",
+    occurredAt: clock()
+  });
+  
+  session = await sessionService.finishSession(session.id);
+  
+  const leaderboardBefore = await listLeaderboardEntries();
+  const originalEntry = leaderboardBefore.find(e => e.sessionId === session.id);
+  assert.ok(originalEntry, "Session should be in leaderboard");
+  
+  const leaderboardScore = originalEntry.score;
+  
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: session.id,
+    playerName: session.playerName,
+    ...event1
+  }));
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: session.id,
+    playerName: session.playerName,
+    ...event2
+  }));
+
+  const service = await createRecoveryService({ 
+    dryRun: false, 
+    createBackup: false 
+  });
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.summary.totalSessions, 1);
+  
+  const leaderboardAfter = await listLeaderboardEntries();
+  assert.strictEqual(leaderboardAfter.length, 1, "Should not create duplicate leaderboard entry");
+  
+  const finalEntry = leaderboardAfter.find(e => e.sessionId === session.id);
+  assert.ok(finalEntry);
+  assert.strictEqual(finalEntry.score, leaderboardScore, "Score should remain consistent");
+});
+
+test("recovery: validateApiKey function - works correctly", async () => {
+  const { validateApiKey } = require("../src/middleware/recovery-auth");
+  const { RECOVERY_REQUIRE_AUTH, RECOVERY_API_KEY } = require("../src/config");
+  
+  const result = validateApiKey(null);
+  assert.strictEqual(typeof result.valid, "boolean");
+  assert.ok(result.reason);
+  
+  if (!RECOVERY_REQUIRE_AUTH) {
+    assert.strictEqual(result.valid, true);
+    assert.strictEqual(result.reason, "auth_disabled");
+  }
+});

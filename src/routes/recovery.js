@@ -14,14 +14,17 @@ const {
   getCurrentRecoveryState,
   interruptRecoveryTracking,
   getCurrentProgress,
+  getTransactionMode,
   RECOVERY_STATES
 } = require("../services/recovery-manager");
+const { requireRecoveryAuth } = require("../middleware/recovery-auth");
 const { HttpError } = require("../utils/http-error");
 
 const runRecoverySchema = z.object({
   dryRun: z.boolean().optional().default(true),
   createBackup: z.boolean().optional().default(true),
   quarantineCorrupted: z.boolean().optional().default(true),
+  enableTransaction: z.boolean().optional().default(true),
   logFilePath: z.string().optional().nullable()
 });
 
@@ -49,7 +52,18 @@ function createRecoveryRouter() {
     });
   }));
 
-  router.post("/run", asyncHandler(async (req, res) => {
+  router.get("/config", asyncHandler(async (_req, res) => {
+    const txnMode = await getTransactionMode();
+    
+    res.json({
+      ok: true,
+      transactionMode: txnMode.enabled,
+      tempDir: txnMode.tempDir,
+      availableStates: Object.values(RECOVERY_STATES)
+    });
+  }));
+
+  router.post("/run", requireRecoveryAuth, asyncHandler(async (req, res) => {
     const currentState = getCurrentRecoveryState();
     if (currentState && currentState.status === RECOVERY_STATES.RUNNING) {
       throw new HttpError(409, "Recovery is already running", {
@@ -65,6 +79,7 @@ function createRecoveryRouter() {
       dryRun: body.dryRun,
       createBackup: body.createBackup,
       quarantineCorrupted: body.quarantineCorrupted,
+      enableTransaction: body.enableTransaction,
       logFilePath: body.logFilePath || null,
       onProgress: (progress) => {
         progressUpdates.push({
@@ -79,17 +94,22 @@ function createRecoveryRouter() {
     res.json({
       ok: report.success,
       dryRun: body.dryRun,
+      wasInterrupted: report.wasInterrupted || false,
+      rolledBack: report.rollbackResult?.rolledBack || false,
       report: {
         id: report.id || null,
+        transactionId: report.transactionId || null,
         timestamp: report.timestamp,
         summary: report.summary,
-        success: report.success
+        success: report.success,
+        validation: report.validation || null,
+        rollbackResult: report.rollbackResult || null
       },
-      progressUpdates: progressUpdates.slice(-10)
+      progressUpdates: progressUpdates.slice(-15)
     });
   }));
 
-  router.post("/interrupt", asyncHandler(async (_req, res) => {
+  router.post("/interrupt", requireRecoveryAuth, asyncHandler(async (_req, res) => {
     const currentState = getCurrentRecoveryState();
     
     if (!currentState || currentState.status !== RECOVERY_STATES.RUNNING) {
@@ -117,7 +137,7 @@ function createRecoveryRouter() {
     });
   }));
 
-  router.post("/backups/:backupId/restore", asyncHandler(async (req, res) => {
+  router.post("/backups/:backupId/restore", requireRecoveryAuth, asyncHandler(async (req, res) => {
     const { backupId } = req.params;
     
     const currentState = getCurrentRecoveryState();

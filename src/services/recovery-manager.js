@@ -5,9 +5,11 @@ const {
   QUARANTINE_DIR,
   RECOVERY_REPORTS_DIR,
   RECOVERY_STATE_FILE,
+  RECOVERY_TEMP_DIR,
   SESSION_DIR,
   EVENTS_LOG_FILE,
-  LEADERBOARD_FILE
+  LEADERBOARD_FILE,
+  RECOVERY_TRANSACTION_MODE
 } = require("../config");
 const { ensureDir, readJson, writeJsonAtomic } = require("../utils/file-store");
 const { createId } = require("../utils/id");
@@ -17,12 +19,15 @@ const RECOVERY_STATES = {
   RUNNING: "running",
   INTERRUPTED: "interrupted",
   COMPLETED: "completed",
-  FAILED: "failed"
+  FAILED: "failed",
+  ROLLING_BACK: "rolling_back",
+  ROLLED_BACK: "rolled_back"
 };
 
 let currentRecoveryState = null;
 let isInterrupted = false;
 let currentProgress = null;
+let activeTransactionId = null;
 
 function generateTimestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -32,6 +37,7 @@ async function ensureRecoveryDirs() {
   await ensureDir(BACKUP_DIR);
   await ensureDir(QUARANTINE_DIR);
   await ensureDir(RECOVERY_REPORTS_DIR);
+  await ensureDir(RECOVERY_TEMP_DIR);
 }
 
 async function createBackupFn(label = "pre-recovery") {
@@ -499,6 +505,160 @@ async function interruptRecoveryTracking() {
   return state;
 }
 
+async function createTransaction() {
+  await ensureRecoveryDirs();
+  
+  const timestamp = generateTimestamp();
+  const transactionId = `txn_${timestamp}_${createId("txn")}`;
+  
+  activeTransactionId = transactionId;
+  
+  return {
+    transactionId,
+    createdAt: new Date().toISOString(),
+    transactionMode: RECOVERY_TRANSACTION_MODE
+  };
+}
+
+async function rollbackTransaction(transactionId, backupResult = null) {
+  if (!RECOVERY_TRANSACTION_MODE) {
+    return { success: true, skipped: true, reason: "transaction_mode_disabled" };
+  }
+  
+  currentRecoveryState = {
+    status: RECOVERY_STATES.ROLLING_BACK,
+    rollingBackAt: new Date().toISOString(),
+    transactionId,
+    backupResult
+  };
+  
+  await saveRecoveryState(currentRecoveryState);
+  
+  updateProgress({
+    phase: "rolling_back",
+    percent: currentProgress?.percent || 0,
+    message: "Rolling back recovery..."
+  });
+  
+  try {
+    if (backupResult && backupResult.success && backupResult.backupId) {
+      const restoreResult = await restoreFromBackup(backupResult.backupId);
+      
+      if (!restoreResult.success) {
+        throw new Error(`Failed to restore from backup: ${restoreResult.error}`);
+      }
+      
+      currentRecoveryState = {
+        status: RECOVERY_STATES.ROLLED_BACK,
+        rolledBackAt: new Date().toISOString(),
+        transactionId,
+        restoredFromBackup: backupResult.backupId
+      };
+      
+      await saveRecoveryState(currentRecoveryState);
+      
+      updateProgress({
+        phase: "rolled_back",
+        percent: 100,
+        message: "Recovery rolled back successfully"
+      });
+      
+      return {
+        success: true,
+        transactionId,
+        rolledBack: true,
+        restoredFromBackup: backupResult.backupId
+      };
+    } else {
+      currentRecoveryState = {
+        status: RECOVERY_STATES.ROLLED_BACK,
+        rolledBackAt: new Date().toISOString(),
+        transactionId,
+        warning: "No backup available for rollback"
+      };
+      
+      await saveRecoveryState(currentRecoveryState);
+      
+      return {
+        success: true,
+        transactionId,
+        rolledBack: true,
+        warning: "No backup available for rollback"
+      };
+    }
+  } catch (error) {
+    currentRecoveryState = {
+      status: RECOVERY_STATES.FAILED,
+      failedAt: new Date().toISOString(),
+      transactionId,
+      rollbackError: error.message
+    };
+    
+    await saveRecoveryState(currentRecoveryState);
+    
+    return {
+      success: false,
+      transactionId,
+      rolledBack: false,
+      error: error.message
+    };
+  }
+}
+
+function getActiveTransactionId() {
+  return activeTransactionId;
+}
+
+function clearActiveTransaction() {
+  activeTransactionId = null;
+}
+
+async function validateRecoveryResult(eventsCount, sessionsCount, report) {
+  const issues = [];
+  const warnings = [];
+  
+  if (!report || !report.success) {
+    issues.push({
+      type: "recovery_failed",
+      message: "Recovery process reported failure"
+    });
+    return { valid: false, issues, warnings };
+  }
+  
+  if (report.summary.recovered === 0 && report.summary.skipped === 0 && report.summary.failed === 0) {
+    warnings.push({
+      type: "no_sessions_processed",
+      message: "No sessions were processed during recovery"
+    });
+  }
+  
+  if (report.summary.totalSessions !== (report.summary.recovered + report.summary.skipped + report.summary.failed)) {
+    issues.push({
+      type: "session_count_mismatch",
+      message: `Session count mismatch: total=${report.summary.totalSessions}, sum=${report.summary.recovered + report.summary.skipped + report.summary.failed}`
+    });
+  }
+  
+  return {
+    valid: issues.length === 0,
+    issues,
+    warnings,
+    summary: {
+      totalSessions: report.summary.totalSessions,
+      recovered: report.summary.recovered,
+      skipped: report.summary.skipped,
+      failed: report.summary.failed
+    }
+  };
+}
+
+async function getTransactionMode() {
+  return {
+    enabled: RECOVERY_TRANSACTION_MODE,
+    tempDir: RECOVERY_TEMP_DIR
+  };
+}
+
 module.exports = {
   RECOVERY_STATES,
   generateTimestamp,
@@ -521,5 +681,11 @@ module.exports = {
   getCurrentProgress,
   startRecoveryTracking,
   completeRecoveryTracking,
-  interruptRecoveryTracking
+  interruptRecoveryTracking,
+  createTransaction,
+  rollbackTransaction,
+  getActiveTransactionId,
+  clearActiveTransaction,
+  validateRecoveryResult,
+  getTransactionMode
 };
