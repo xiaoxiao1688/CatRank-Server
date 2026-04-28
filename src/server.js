@@ -3,6 +3,7 @@ const { HOST, PORT } = require("./config");
 const { ensureSessionStorage } = require("./repositories/session-repo");
 const { ensureLeaderboardStorage } = require("./repositories/leaderboard-repo");
 const { ensureEventLogStorage } = require("./repositories/event-log-repo");
+const { ensureRecoveryDirs } = require("./services/recovery-manager");
 const { createSessionService } = require("./services/session-service");
 const { createLeaderboardService } = require("./services/leaderboard-service");
 
@@ -10,7 +11,8 @@ async function bootstrap() {
   await Promise.all([
     ensureSessionStorage(),
     ensureLeaderboardStorage(),
-    ensureEventLogStorage()
+    ensureEventLogStorage(),
+    ensureRecoveryDirs()
   ]);
 
   const sessionService = createSessionService();

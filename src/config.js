@@ -6,6 +6,11 @@ const SESSION_DIR = path.join(DATA_DIR, "sessions");
 const LEADERBOARD_FILE = path.join(DATA_DIR, "leaderboard.json");
 const EVENTS_LOG_FILE = path.join(DATA_DIR, "events.log");
 
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+const QUARANTINE_DIR = path.join(DATA_DIR, "quarantine");
+const RECOVERY_REPORTS_DIR = path.join(DATA_DIR, "recovery-reports");
+const RECOVERY_STATE_FILE = path.join(DATA_DIR, "recovery-state.json");
+
 function parseEnvNumber(key, defaultValue) {
   const value = process.env[key];
   if (value === undefined || value === "") {
@@ -23,6 +28,10 @@ module.exports = {
   SESSION_DIR,
   LEADERBOARD_FILE,
   EVENTS_LOG_FILE,
+  BACKUP_DIR,
+  QUARANTINE_DIR,
+  RECOVERY_REPORTS_DIR,
+  RECOVERY_STATE_FILE,
   SESSION_TTL_MS: parseEnvNumber("SESSION_TTL_MS", 15 * 60 * 1000),
   MAX_EVENTS_PER_SESSION: parseEnvNumber("MAX_EVENTS_PER_SESSION", 1000),
   MAX_EVENT_FUTURE_SKEW_MS: parseEnvNumber("MAX_EVENT_FUTURE_SKEW_MS", 30 * 1000),
