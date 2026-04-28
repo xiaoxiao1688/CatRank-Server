@@ -17,12 +17,21 @@ const RECOVERY_STATES = {
   RUNNING: "running",
   INTERRUPTED: "interrupted",
   COMPLETED: "completed",
-  FAILED: "failed"
+  FAILED: "failed",
+  ROLLING_BACK: "rolling_back",
+  ROLLED_BACK: "rolled_back"
+};
+
+const ROLLBACK_TRIGGERS = {
+  INTERRUPT: "interrupt",
+  ERROR: "error",
+  MANUAL: "manual"
 };
 
 let currentRecoveryState = null;
 let isInterrupted = false;
 let currentProgress = null;
+let activeTransaction = null;
 
 function generateTimestamp() {
   return new Date().toISOString().replace(/[:.]/g, "-");
@@ -479,13 +488,16 @@ async function completeRecoveryTracking(report, success = true) {
   return state;
 }
 
-async function interruptRecoveryTracking() {
+async function interruptRecoveryTracking(options = {}) {
+  const { autoRollback = true } = options;
+  
   isInterrupted = true;
   
   const state = {
     status: RECOVERY_STATES.INTERRUPTED,
     interruptedAt: new Date().toISOString(),
-    progress: currentProgress
+    progress: currentProgress,
+    autoRollback
   };
 
   await saveRecoveryState(state);
@@ -499,13 +511,154 @@ async function interruptRecoveryTracking() {
   return state;
 }
 
+function startTransaction(trackingState) {
+  activeTransaction = {
+    id: createId("tx"),
+    startedAt: new Date().toISOString(),
+    backupResult: trackingState?.backupResult || null,
+    processedSessions: [],
+    processedLeaderboardEntries: [],
+    status: "active"
+  };
+  return activeTransaction;
+}
+
+function getActiveTransaction() {
+  return activeTransaction;
+}
+
+function recordProcessedSession(sessionId, action) {
+  if (!activeTransaction) return null;
+  
+  const record = {
+    sessionId,
+    action,
+    processedAt: new Date().toISOString()
+  };
+  activeTransaction.processedSessions.push(record);
+  return record;
+}
+
+function clearTransaction() {
+  activeTransaction = null;
+}
+
+async function rollbackFromBackup(backupResult, trigger = ROLLBACK_TRIGGERS.MANUAL) {
+  if (!backupResult || !backupResult.backupId) {
+    return {
+      success: false,
+      error: "No backup available for rollback",
+      trigger
+    };
+  }
+
+  const state = {
+    status: RECOVERY_STATES.ROLLING_BACK,
+    rollbackStartedAt: new Date().toISOString(),
+    backupId: backupResult.backupId,
+    trigger
+  };
+  await saveRecoveryState(state);
+
+  currentProgress = {
+    phase: "rolling_back",
+    percent: 50,
+    message: "Rolling back to pre-recovery state..."
+  };
+
+  const restoreResult = await restoreFromBackup(backupResult.backupId);
+
+  const finalState = {
+    status: restoreResult.success ? RECOVERY_STATES.ROLLED_BACK : RECOVERY_STATES.FAILED,
+    rollbackCompletedAt: new Date().toISOString(),
+    backupId: backupResult.backupId,
+    trigger,
+    restoreResult
+  };
+  await saveRecoveryState(finalState);
+
+  currentProgress = {
+    phase: restoreResult.success ? "rolled_back" : "rollback_failed",
+    percent: 100,
+    message: restoreResult.success ? "Rollback completed successfully" : "Rollback failed"
+  };
+
+  clearTransaction();
+
+  return {
+    success: restoreResult.success,
+    backupId: backupResult.backupId,
+    trigger,
+    restoredItems: restoreResult.restoredItems || 0,
+    error: restoreResult.error
+  };
+}
+
+function canRollback(trackingState) {
+  if (!trackingState) return false;
+  if (trackingState.dryRun) return false;
+  if (!trackingState.backupResult || !trackingState.backupResult.success) return false;
+  if (!trackingState.backupResult.backupId) return false;
+  return true;
+}
+
+async function validateRecoveryConsistency(options = {}) {
+  const { sessionIds = [], eventSessionMap = null } = options;
+  
+  const issues = [];
+  
+  for (const sessionId of sessionIds) {
+    try {
+      const session = await readJson(path.join(SESSION_DIR, `${sessionId}.json`), null);
+      if (!session) {
+        issues.push({
+          type: "missing_session",
+          sessionId,
+          message: "Session file missing after recovery"
+        });
+        continue;
+      }
+      
+      if (eventSessionMap && eventSessionMap[sessionId]) {
+        const expectedEvents = eventSessionMap[sessionId].events;
+        if (session.events.length !== expectedEvents.length) {
+          issues.push({
+            type: "event_count_mismatch",
+            sessionId,
+            expected: expectedEvents.length,
+            actual: session.events.length,
+            message: "Event count mismatch between log and session"
+          });
+        }
+      }
+    } catch (error) {
+      issues.push({
+        type: "validation_error",
+        sessionId,
+        error: error.message,
+        message: "Error validating session"
+      });
+    }
+  }
+  
+  return {
+    valid: issues.length === 0,
+    issues,
+    checkedCount: sessionIds.length,
+    issueCount: issues.length
+  };
+}
+
 module.exports = {
   RECOVERY_STATES,
+  ROLLBACK_TRIGGERS,
   generateTimestamp,
   ensureRecoveryDirs,
   createBackup: createBackupFn,
   listBackups,
   restoreFromBackup,
+  rollbackFromBackup,
+  canRollback,
   quarantineCorruptedLogLines,
   quarantineCorruptedSession,
   listQuarantinedItems,
@@ -521,5 +674,10 @@ module.exports = {
   getCurrentProgress,
   startRecoveryTracking,
   completeRecoveryTracking,
-  interruptRecoveryTracking
+  interruptRecoveryTracking,
+  startTransaction,
+  getActiveTransaction,
+  recordProcessedSession,
+  clearTransaction,
+  validateRecoveryConsistency
 };
