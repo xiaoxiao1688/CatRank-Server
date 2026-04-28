@@ -11,14 +11,7 @@ const {
   completeRecoveryTracking,
   getCurrentProgress,
   quarantineCorruptedLogLines,
-  quarantineCorruptedSession,
-  startTransaction,
-  recordProcessedSession,
-  clearTransaction,
-  rollbackFromBackup,
-  canRollback,
-  ROLLBACK_TRIGGERS,
-  validateRecoveryConsistency
+  quarantineCorruptedSession
 } = require("./recovery-manager");
 
 async function createRecoveryService(options = {}) {
@@ -27,8 +20,6 @@ async function createRecoveryService(options = {}) {
     logFilePath = null,
     createBackup = true,
     quarantineCorrupted = true,
-    rollbackOnError = true,
-    autoRollbackOnInterrupt = true,
     onProgress = null
   } = options;
 
@@ -41,23 +32,17 @@ async function createRecoveryService(options = {}) {
 
   function checkInterruption() {
     if (isRecoveryInterrupted()) {
-      const error = new Error("Recovery was interrupted");
-      error.isInterrupted = true;
-      throw error;
+      throw new Error("Recovery was interrupted");
     }
   }
 
   async function runRecovery() {
     const trackingState = await startRecoveryTracking({ dryRun, createBackup });
     
-    startTransaction(trackingState);
-    
     const report = {
       dryRun,
       createBackup,
       backupResult: trackingState.backupResult,
-      rollbackOnError,
-      autoRollbackOnInterrupt,
       timestamp: new Date().toISOString(),
       summary: {
         totalSessions: 0,
@@ -96,7 +81,6 @@ async function createRecoveryService(options = {}) {
           error: parseResult.error ? parseResult.error.message : "Unknown error"
         };
         await completeRecoveryTracking(report, false);
-        clearTransaction();
         return report;
       }
 
@@ -219,7 +203,6 @@ async function createRecoveryService(options = {}) {
             } else {
               await performSessionRecovery(replayResult.session, leaderboardMap);
               sessionReport.recoveryAction = "updated";
-              recordProcessedSession(sessionId, "updated");
             }
             report.summary.recovered++;
           }
@@ -229,7 +212,6 @@ async function createRecoveryService(options = {}) {
           } else {
             await performSessionRecovery(replayResult.session, leaderboardMap);
             sessionReport.recoveryAction = "created";
-            recordProcessedSession(sessionId, "created");
           }
           report.summary.recovered++;
         }
@@ -244,36 +226,9 @@ async function createRecoveryService(options = {}) {
         message: "Finalizing recovery report..."
       });
 
-      if (!dryRun && report.summary.recovered > 0) {
-        emitProgress({
-          phase: "validating",
-          percent: 97,
-          message: "Validating recovery consistency..."
-        });
-        
-        const recoveredSessionIds = report.details.sessions
-          .filter(s => s.recoveryAction === "created" || s.recoveryAction === "updated")
-          .map(s => s.sessionId);
-        
-        const validationResult = await validateRecoveryConsistency({
-          sessionIds: recoveredSessionIds
-        });
-        
-        report.validation = validationResult;
-        
-        if (!validationResult.valid) {
-          report.details.issues.push({
-            type: "validation_failed",
-            message: "Recovery consistency validation failed",
-            issues: validationResult.issues
-          });
-        }
-      }
-
       report.success = true;
       
       await completeRecoveryTracking(report, true);
-      clearTransaction();
 
       emitProgress({
         phase: "completed",
@@ -285,31 +240,11 @@ async function createRecoveryService(options = {}) {
       report.error = {
         message: "Recovery process failed",
         error: error.message,
-        stack: error.stack,
-        isInterrupted: error.isInterrupted || false
+        stack: error.stack
       };
       report.success = false;
       
-      const shouldRollback = !dryRun && canRollback(trackingState) && (
-        (rollbackOnError && !error.isInterrupted) ||
-        (autoRollbackOnInterrupt && error.isInterrupted)
-      );
-      
-      if (shouldRollback) {
-        const trigger = error.isInterrupted ? ROLLBACK_TRIGGERS.INTERRUPT : ROLLBACK_TRIGGERS.ERROR;
-        
-        emitProgress({
-          phase: "rolling_back",
-          percent: 90,
-          message: `Rolling back due to ${trigger}...`
-        });
-        
-        report.rollbackResult = await rollbackFromBackup(trackingState.backupResult, trigger);
-        report.wasRolledBack = report.rollbackResult.success;
-      } else {
-        await completeRecoveryTracking(report, false);
-        clearTransaction();
-      }
+      await completeRecoveryTracking(report, false);
     }
 
     return report;
