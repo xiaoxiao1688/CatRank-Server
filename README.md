@@ -1027,10 +1027,201 @@ data/
 
 新增完整的数据导出/导入功能，支持：
 - 完整数据备份（sessions、events log、leaderboard）
-- 可选 gzip 压缩
-- 多种合并策略（跳过、覆盖、合并）
+- 统一的 JSON 归档格式（可选 gzip 压缩）
+- 三种合并策略（跳过、覆盖、智能合并）
 - 操作前自动备份
 - 失败自动回滚
+- 重复导入检测
+- 支持大文件流式处理
+- 操作可取消
+
+### 导出包格式与命名
+
+#### 命名规范
+
+导出包使用统一的命名格式：
+```
+catrank-export-YYYYMMDD-HHMMSS-{short-id}.json.gz
+```
+
+示例：
+```
+catrank-export-20260430-143022-abc123.json.gz
+```
+
+- `YYYYMMDD`: 日期（年-月-日）
+- `HHMMSS`: 时间（时-分-秒）
+- `short-id`: 8 字符随机 ID
+
+#### 文件格式
+
+导出包是一个 JSON 归档文件，支持两种格式：
+- 压缩格式：`.json.gz`（gzip 压缩，默认）
+- 非压缩格式：`.json`（纯 JSON）
+
+内部结构：
+```json
+{
+  "manifest": {
+    "id": "catrank-export-20260430-143022-abc123",
+    "version": "1.1",
+    "createdAt": "2026-04-30T14:30:22.000Z",
+    "includes": {
+      "sessions": true,
+      "leaderboard": true,
+      "eventLog": true
+    },
+    "sessionCount": 50,
+    "leaderboardEntryCount": 30,
+    "eventCount": 1500
+  },
+  "files": {
+    "manifest.json": "...",
+    "sessions/sess_xxx.json": "...",
+    "sessions/sess_yyy.json": "...",
+    "leaderboard.json": "...",
+    "events.json": "..."
+  }
+}
+```
+
+### 合并策略详解
+
+导入支持三种合并策略，每种策略在不同数据类型上有不同的行为：
+
+#### skip_existing（默认）
+
+| 数据类型 | 行为 |
+|---------|------|
+| **Sessions** | 跳过已存在的 session（按 session.id 判断），只导入新的 |
+| **Leaderboard** | 跳过已存在的 sessionId，只添加新条目 |
+| **Event Log** | 跳过已存在的 event.id，只添加新事件 |
+
+使用场景：从不同环境导入数据，避免覆盖现有数据。
+
+#### overwrite
+
+| 数据类型 | 行为 |
+|---------|------|
+| **Sessions** | 完全覆盖：如果 session 已存在则覆盖，不存在则添加 |
+| **Leaderboard** | 完全替换：整个 leaderboard 被导入数据替换 |
+| **Event Log** | 完全替换：清空现有日志，写入导入的日志 |
+
+使用场景：完全替换现有数据，恢复到导出时的状态。
+
+#### merge（智能合并）
+
+| 数据类型 | 行为 |
+|---------|------|
+| **Sessions** | 比较时间戳：如果导入的 session 有更新的时间（updatedAt/closedAt/finishedAt/createdAt）则覆盖，否则保留现有 |
+| **Leaderboard** | 保留最高分：如果导入的 entry 分数更高则替换，否则保留现有 |
+| **Event Log** | 去重添加：跳过已存在的 event.id，只添加新事件（同 skip_existing） |
+
+使用场景：合并来自不同时间点的数据，保留最新/最优状态。
+
+### 导入校验与错误处理
+
+#### 校验层级
+
+导入包会经过多层校验：
+
+1. **格式校验**：检查是否为有效的 JSON 归档
+2. **Manifest 校验**：检查 manifest 中的必需字段
+3. **版本校验**：检查格式版本兼容性
+4. **数据校验**：
+   - Sessions：检查每个 session 是否有 id
+   - Leaderboard：检查是否为数组，每个条目是否有 sessionId 和 score
+   - Event Log：检查是否为数组
+
+#### 错误类型
+
+| 错误类型 | severity | recoverable | 说明 |
+|---------|----------|-------------|------|
+| missing_manifest | error | false | 缺少 manifest.json |
+| invalid_manifest | error | false | manifest 缺少必需字段 |
+| version_incompatible | error | false | 版本过高，无法兼容 |
+| invalid_session | error | true | 单个 session 无效 |
+| corrupted_session | error | true | 单个 session 文件损坏 |
+| invalid_leaderboard | error | true | leaderboard 格式错误 |
+| invalid_events | error | true | 事件日志格式错误 |
+| sessions_read_error | error | false | 无法读取 sessions 目录 |
+
+#### 忽略可恢复错误
+
+如果设置 `ignoreValidationErrors: true`，可恢复错误（recoverable: true）会被忽略，导入继续执行：
+
+```json
+{
+  "source": "catrank-export-xxx.json.gz",
+  "strategy": "merge",
+  "ignoreValidationErrors": true
+}
+```
+
+### 重复导入检测
+
+系统会自动检测重复导入：
+
+1. 每个导出包有唯一的 `exportId`（存储在 manifest.id）
+2. 导入历史记录在 `data/import-history/` 目录
+3. 导入前会检查该 exportId 是否已被导入
+
+#### 允许重复导入
+
+如果需要重复导入同一个包，可以设置 `allowDuplicateImport: true`：
+
+```json
+{
+  "source": "catrank-export-xxx.json.gz",
+  "strategy": "merge",
+  "allowDuplicateImport": true
+}
+```
+
+### 取消任务
+
+导出/导入操作支持取消：
+
+1. **调用取消 API**：`POST /api/export-import/operations/:operationId/cancel`
+2. **中断检查点**：操作在关键步骤会检查是否被中断
+   - 导出：读取 sessions、读取 leaderboard、读取 events、写入归档
+   - 导入：提取包、校验、导入 sessions、导入 leaderboard、导入 events
+3. **清理**：取消后会清理临时文件
+
+### 回滚恢复
+
+导入操作内置回滚机制：
+
+1. **自动备份**：导入前会自动备份以下资源：
+   - sessions 目录 → `data/backups/import_xxx/sessions/`
+   - events.log → `data/backups/import_xxx/events.log`
+   - leaderboard.json → `data/backups/import_xxx/leaderboard.json`
+
+2. **失败自动回滚**：如果导入失败且 `autoRollbackOnFailure` 为 true（默认），会自动从备份恢复
+
+3. **手动恢复**：可以通过 API 手动恢复：
+   ```
+   POST /api/export-import/backups/imports/:backupId/restore
+   ```
+
+### 大文件处理
+
+系统针对大文件做了以下优化：
+
+#### 事件日志流式处理
+
+事件日志使用 `readline` 模块流式读取：
+- 不会一次性加载全部内容到内存
+- 支持超大事件日志（GB 级别）
+- 批量写入（每 1000 个事件一批）
+
+#### 内存优化
+
+| 操作 | 优化方式 |
+|------|----------|
+| 读取事件日志 | 流式逐行读取，不加载全部到内存 |
+| 写入事件日志 | 批量写入，减少 I/O 次数 |
+| 导入操作 | 逐文件处理，不一次性加载所有数据 |
 
 ### 导出功能
 
@@ -1043,22 +1234,38 @@ data/
 {
   "compress": true,
   "includeSessions": true,
-  "includeEvents": true,
-  "includeLeaderboard": true
+  "includeLeaderboard": true,
+  "includeEventLog": true,
+  "dryRun": false
 }
 ```
 
-- `compress`: 是否压缩，默认 true
+- `compress`: 是否 gzip 压缩，默认 true
 - `includeSessions`: 是否包含会话数据，默认 true
-- `includeEvents`: 是否包含事件日志，默认 true
 - `includeLeaderboard`: 是否包含排行榜，默认 true
+- `includeEventLog`: 是否包含事件日志，默认 true
+- `dryRun`: 是否为试运行，默认 false（导出不支持 dry-run，此参数无效）
 
 响应：
 ```json
 {
   "ok": true,
-  "operationId": "exp_xxx",
-  "state": "running"
+  "dryRun": false,
+  "operationId": "op_abc123",
+  "result": {
+    "success": true,
+    "exportId": "catrank-export-20260430-143022-abc123",
+    "outputPath": "data/exports/catrank-export-20260430-143022-abc123.json.gz",
+    "compressed": true,
+    "fileSize": 1048576,
+    "manifest": {
+      "id": "catrank-export-20260430-143022-abc123",
+      "version": "1.1",
+      "sessionCount": 50,
+      "leaderboardEntryCount": 30,
+      "eventCount": 1500
+    }
+  }
 }
 ```
 
@@ -1072,18 +1279,19 @@ data/
   "ok": true,
   "exports": [
     {
-      "id": "exp_20260427_000000",
-      "createdAt": "2026-04-27T00:00:00.000Z",
+      "id": "catrank-export-20260430-143022-abc123",
+      "name": "catrank-export-20260430-143022-abc123.json.gz",
       "size": 1048576,
-      "compressed": true,
-      "filename": "export_20260427_000000.tar.gz",
+      "createdAt": "2026-04-30T14:30:22.000Z",
+      "isCompressed": true,
       "manifest": {
-        "sessions": 50,
-        "events": 1500,
-        "leaderboardEntries": 30
+        "sessionCount": 50,
+        "leaderboardEntryCount": 30,
+        "eventCount": 1500
       }
     }
-  ]
+  ],
+  "count": 1
 }
 ```
 
@@ -1104,16 +1312,12 @@ data/
 请求体：
 ```json
 {
-  "filePath": "path/to/export.tar.gz",
-  "strategy": "merge"
+  "source": "catrank-export-20260430-143022-abc123.json.gz",
+  "importSessions": true,
+  "importLeaderboard": true,
+  "importEventLog": true
 }
 ```
-
-- `filePath`: 导入包路径（相对于 imports 目录）
-- `strategy`: 合并策略
-  - `skip_existing`: 跳过已存在的数据（默认）
-  - `overwrite`: 覆盖已存在的数据
-  - `merge`: 合并数据
 
 响应：
 ```json
@@ -1121,12 +1325,37 @@ data/
   "ok": true,
   "valid": true,
   "manifest": {
-    "version": "1.0",
-    "createdAt": "2026-04-27T00:00:00.000Z",
-    "sessions": 50,
-    "events": 1500,
-    "leaderboardEntries": 30
-  }
+    "id": "catrank-export-20260430-143022-abc123",
+    "version": "1.1",
+    "sessionCount": 50
+  },
+  "issues": [],
+  "warnings": []
+}
+```
+
+如果有校验问题：
+```json
+{
+  "ok": false,
+  "valid": false,
+  "manifest": { ... },
+  "issues": [
+    {
+      "type": "invalid_session",
+      "severity": "error",
+      "file": "sess_invalid.json",
+      "message": "Session missing 'id' field",
+      "recoverable": true
+    }
+  ],
+  "warnings": [
+    {
+      "type": "version_mismatch",
+      "severity": "warning",
+      "message": "Import package version 1.0 may have different format than current version 1.1"
+    }
+  ]
 }
 ```
 
@@ -1137,38 +1366,106 @@ data/
 请求体：
 ```json
 {
-  "filePath": "export_20260427_000000.tar.gz",
+  "source": "catrank-export-20260430-143022-abc123.json.gz",
   "strategy": "merge",
-  "createBackup": true
+  "importSessions": true,
+  "importLeaderboard": true,
+  "importEventLog": true,
+  "dryRun": true,
+  "ignoreValidationErrors": false,
+  "allowDuplicateImport": false
 }
 ```
 
-- `filePath`: 导入包文件名（必须在 imports 目录中）
-- `strategy`: 合并策略（同上）
-- `createBackup`: 导入前是否创建备份，默认 true
+- `source`: 导入包文件名（必须在 `data/imports/` 目录中）
+- `strategy`: 合并策略（`skip_existing` / `overwrite` / `merge`）
+- `importSessions`: 是否导入会话，默认 true
+- `importLeaderboard`: 是否导入排行榜，默认 true
+- `importEventLog`: 是否导入事件日志，默认 true
+- `dryRun`: 是否为试运行，默认 true（不会实际修改数据）
+- `ignoreValidationErrors`: 是否忽略可恢复的校验错误，默认 false
+- `allowDuplicateImport`: 是否允许重复导入同一包，默认 false
 
 响应：
 ```json
 {
   "ok": true,
-  "operationId": "imp_xxx",
-  "state": "running"
+  "dryRun": true,
+  "operationId": "op_xyz789",
+  "result": {
+    "success": true,
+    "mergeStrategy": "merge",
+    "sessions": {
+      "imported": 35,
+      "skipped": 10,
+      "overwritten": 5,
+      "failed": 0,
+      "total": 50
+    },
+    "leaderboard": {
+      "imported": 20,
+      "skipped": 8,
+      "overwritten": 2,
+      "failed": 0,
+      "total": 30
+    },
+    "events": {
+      "imported": 1200,
+      "skipped": 300,
+      "failed": 0,
+      "total": 1500
+    },
+    "actions": [
+      { "type": "session", "id": "sess_001", "action": "import" },
+      { "type": "session", "id": "sess_002", "action": "overwrite", "reason": "newer_version" },
+      { "type": "leaderboard_entry", "sessionId": "sess_003", "action": "replace", "reason": "higher_score" }
+    ],
+    "warnings": [],
+    "duplicateCheck": {
+      "exportId": "catrank-export-20260430-143022-abc123",
+      "wasDuplicate": false
+    }
+  }
 }
 ```
 
 #### `GET /api/export-import/imports`
 
-列出可用的导入源（imports 目录中的文件）。
+列出可用的导入源（`data/imports/` 目录中的文件）。
 
-### 导出/导入操作管理
+### 操作管理
 
-#### `GET /api/export-import/operations/exports`
+#### `GET /api/export-import/operations`
 
-列出活跃的导出操作。
+列出所有活跃操作。
 
-#### `GET /api/export-import/operations/imports`
-
-列出活跃的导入操作。
+响应：
+```json
+{
+  "ok": true,
+  "operations": {
+    "exports": [
+      {
+        "id": "op_abc123",
+        "type": "export",
+        "state": "running",
+        "dryRun": false,
+        "createdAt": "2026-04-30T14:30:22.000Z",
+        "progress": {
+          "phase": "sessions",
+          "percent": 25,
+          "message": "Reading sessions..."
+        }
+      }
+    ],
+    "imports": []
+  },
+  "counts": {
+    "exports": 1,
+    "imports": 0
+  }
+}
+```
 
 #### `GET /api/export-import/operations/:operationId`
 
@@ -1178,11 +1475,27 @@ data/
 
 取消操作。
 
-### 导出/导入历史和事件
+响应：
+```json
+{
+  "ok": true,
+  "cancelled": true,
+  "operation": {
+    "id": "op_abc123",
+    "state": "interrupted"
+  }
+}
+```
+
+### 历史与事件
 
 #### `GET /api/export-import/history/exports`
 
 列出导出历史。
+
+查询参数：
+- `limit`: 返回数量限制，默认 50
+- `offset`: 偏移量，默认 0
 
 #### `GET /api/export-import/history/imports`
 
@@ -1192,13 +1505,15 @@ data/
 
 读取导出事件流。
 
+查询参数：
+- `limit`: 返回数量限制，默认 100
+- `offset`: 偏移量，默认 0
+
 #### `GET /api/export-import/events/imports`
 
 读取导入事件流。
 
 ### 备份恢复
-
-导入操作会自动创建备份，可以从备份恢复：
 
 #### `GET /api/export-import/backups/imports`
 
@@ -1208,58 +1523,129 @@ data/
 
 从备份恢复。
 
-### 导出/导入目录结构
-
-```text
-data/
-  exports/              # 导出的包
-    export_20260427_000000.tar.gz
-  imports/              # 待导入的包
-    import_data.tar.gz
-  export-reports/       # 导出报告
-  export-state.json     # 导出操作状态
-  export-temp/          # 导出临时文件
-  export-history/       # 导出历史
-  export-events.log     # 导出事件日志
-  import-reports/       # 导入报告
-  import-state.json     # 导入操作状态
-  import-temp/          # 导入临时文件
-  import-history/       # 导入历史
-  import-events.log     # 导入事件日志
-```
-
-### 导出包格式
-
-导出包是一个 tar 归档（可选 gzip 压缩），包含：
-
-```text
-export_xxx.tar.gz
-├── manifest.json       # 元数据
-├── sessions/           # 会话文件
-│   ├── sess_xxx.json
-│   └── ...
-├── events.log          # 事件日志
-└── leaderboard.json    # 排行榜数据
-```
-
-manifest.json 格式：
+响应：
 ```json
 {
-  "version": "1.0",
-  "createdAt": "2026-04-27T00:00:00.000Z",
-  "compressed": true,
-  "content": {
+  "ok": true,
+  "backupId": "backup_xxx",
+  "restoredItems": {
     "sessions": 50,
-    "events": 1500,
-    "leaderboardEntries": 30
-  },
-  "checksums": {
-    "sessions": "sha256:...",
-    "events.log": "sha256:...",
-    "leaderboard.json": "sha256:..."
+    "eventsLog": true,
+    "leaderboard": true
   }
 }
 ```
+
+### 使用示例
+
+#### 1. 导出数据
+
+```bash
+curl -X POST http://localhost:3000/api/export-import/export \
+  -H "Content-Type: application/json" \
+  -H "X-Recovery-Auth: your-recovery-key" \
+  -d '{
+    "compress": true,
+    "includeSessions": true,
+    "includeLeaderboard": true,
+    "includeEventLog": true
+  }'
+```
+
+#### 2. 准备导入
+
+将导出包复制到 `data/imports/` 目录：
+```bash
+cp data/exports/catrank-export-xxx.json.gz data/imports/
+```
+
+#### 3. 验证导入包
+
+```bash
+curl -X POST http://localhost:3000/api/export-import/import/validate \
+  -H "Content-Type: application/json" \
+  -H "X-Recovery-Auth: your-recovery-key" \
+  -d '{
+    "source": "catrank-export-xxx.json.gz"
+  }'
+```
+
+#### 4. 试运行导入（dry-run）
+
+```bash
+curl -X POST http://localhost:3000/api/export-import/import \
+  -H "Content-Type: application/json" \
+  -H "X-Recovery-Auth: your-recovery-key" \
+  -d '{
+    "source": "catrank-export-xxx.json.gz",
+    "strategy": "merge",
+    "dryRun": true
+  }'
+```
+
+#### 5. 执行真实导入
+
+```bash
+curl -X POST http://localhost:3000/api/export-import/import \
+  -H "Content-Type: application/json" \
+  -H "X-Recovery-Auth: your-recovery-key" \
+  -d '{
+    "source": "catrank-export-xxx.json.gz",
+    "strategy": "merge",
+    "dryRun": false
+  }'
+```
+
+#### 6. 查看导入历史
+
+```bash
+curl http://localhost:3000/api/export-import/history/imports
+```
+
+#### 7. 如有问题，从备份恢复
+
+```bash
+# 列出备份
+curl http://localhost:3000/api/export-import/backups/imports
+
+# 恢复
+curl -X POST http://localhost:3000/api/export-import/backups/imports/:backupId/restore \
+  -H "X-Recovery-Auth: your-recovery-key"
+```
+
+### 目录结构
+
+```text
+data/
+  exports/                    # 导出的包
+    catrank-export-20260430-143022-abc123.json.gz
+  imports/                    # 待导入的包（需手动放置）
+    catrank-export-xxx.json.gz
+  export-reports/             # 导出报告
+  export-state.json           # 导出操作状态
+  export-temp/                # 导出临时文件
+  export-history/             # 导出历史
+  export-events.log           # 导出事件日志
+  import-reports/             # 导入报告
+  import-state.json           # 导入操作状态
+  import-temp/                # 导入临时文件
+  import-history/             # 导入历史（用于重复导入检测）
+  import-events.log           # 导入事件日志
+  backups/                    # 导入前的备份
+    import_xxx/
+      sessions/
+      events.log
+      leaderboard.json
+```
+
+### 注意事项
+
+1. **导入包位置**：导入包必须放置在 `data/imports/` 目录中
+2. **Recovery Auth**：执行导出、导入、取消、恢复等操作需要 `X-Recovery-Auth` 头
+3. **Dry Run**：建议先执行 dry-run 验证结果，再执行真实导入
+4. **合并策略**：根据实际需求选择合适的合并策略
+5. **大文件**：事件日志支持流式处理，无需担心内存问题
+6. **可恢复性**：导入前会自动备份，失败可回滚
 
 ## 完整 API 清单
 
