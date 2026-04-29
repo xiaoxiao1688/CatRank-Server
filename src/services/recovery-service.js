@@ -44,7 +44,7 @@ async function createRecoveryService(options = {}) {
   }
 
   async function performRollback(trackingState, transaction) {
-    if (enableTransaction && !dryRun) {
+    if (enableTransaction && !dryRun && trackingState.backupResult?.success) {
       const currentProgress = getCurrentProgress();
       emitProgress({
         phase: "rolling_back",
@@ -59,7 +59,7 @@ async function createRecoveryService(options = {}) {
       
       return rollbackResult;
     }
-    return { skipped: true, reason: "transaction_disabled_or_dry_run" };
+    return { skipped: true, reason: "transaction_disabled_or_no_backup" };
   }
 
   async function runRecovery() {
@@ -67,7 +67,13 @@ async function createRecoveryService(options = {}) {
       transaction = await createTransaction();
     }
 
-    const trackingState = await startRecoveryTracking({ dryRun, createBackup });
+    const trackingState = await startRecoveryTracking({
+      dryRun,
+      createBackup,
+      metadata: {
+        transactionId: transaction?.transactionId || null
+      }
+    });
     
     const report = {
       dryRun,
@@ -116,13 +122,17 @@ async function createRecoveryService(options = {}) {
           error: parseResult.error ? parseResult.error.message : "Unknown error"
         };
         
-        if (enableTransaction && !dryRun && createBackup && trackingState.backupResult?.success) {
+        if (enableTransaction && !dryRun) {
           rollbackResult = await performRollback(trackingState, transaction);
           rolledBack = rollbackResult.rolledBack;
           report.rollbackResult = rollbackResult;
         }
         
-        await completeRecoveryTracking(report, false);
+        await completeRecoveryTracking(report, {
+          success: false,
+          status: rollbackResult?.rolledBack ? "rolled_back" : null,
+          message: rollbackResult?.rolledBack ? "Recovery rolled back" : "Recovery failed"
+        });
         return report;
       }
 
@@ -278,10 +288,10 @@ async function createRecoveryService(options = {}) {
 
       report.validation = validation;
       
-      if (!validation.valid) {
+        if (!validation.valid) {
         report.details.issues.push(...validation.issues);
         
-        if (enableTransaction && !dryRun && createBackup && trackingState.backupResult?.success) {
+        if (enableTransaction && !dryRun) {
           emitProgress({
             phase: "rolling_back",
             percent: 95,
@@ -305,7 +315,11 @@ async function createRecoveryService(options = {}) {
         message: "Finalizing recovery report..."
       });
       
-      await completeRecoveryTracking(report, report.success);
+      await completeRecoveryTracking(report, {
+        success: report.success,
+        status: rolledBack ? "rolled_back" : null,
+        message: rolledBack ? "Recovery rolled back" : report.success ? "Recovery completed successfully" : "Recovery failed"
+      });
 
       emitProgress({
         phase: "completed",
@@ -327,13 +341,17 @@ async function createRecoveryService(options = {}) {
         report.wasInterrupted = true;
       }
       
-      if (enableTransaction && !dryRun && createBackup && trackingState.backupResult?.success) {
+      if (enableTransaction && !dryRun) {
         rollbackResult = await performRollback(trackingState, transaction);
         rolledBack = rollbackResult.rolledBack;
         report.rollbackResult = rollbackResult;
       }
       
-      await completeRecoveryTracking(report, false);
+      await completeRecoveryTracking(report, {
+        success: false,
+        status: rolledBack ? "rolled_back" : null,
+        message: rolledBack ? "Recovery rolled back" : "Recovery failed"
+      });
     } finally {
       if (transaction) {
         clearActiveTransaction();

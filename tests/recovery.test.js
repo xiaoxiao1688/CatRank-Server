@@ -1027,7 +1027,13 @@ test("recovery: transaction mode - enabled by default", async () => {
 test("recovery: transaction and rollback - interrupt triggers rollback when backup exists", async () => {
   const { createRecoveryService } = require("../src/services/recovery-service");
   const { createSessionService } = require("../src/services/session-service");
-  const { interruptRecoveryTracking, getActiveTransactionId } = require("../src/services/recovery-manager");
+  const { getSessionById } = require("../src/repositories/session-repo");
+  const {
+    interruptRecoveryTracking,
+    getActiveTransactionId,
+    loadRecoveryState,
+    RECOVERY_STATES
+  } = require("../src/services/recovery-manager");
   const { appendLine, ensureDir } = require("../src/utils/file-store");
   const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
   
@@ -1072,6 +1078,69 @@ test("recovery: transaction and rollback - interrupt triggers rollback when back
 
   assert.strictEqual(report.wasInterrupted, true);
   assert.ok(report.rollbackResult !== undefined);
+  assert.strictEqual(report.rollbackResult.rolledBack, true);
+
+  const state = await loadRecoveryState();
+  assert.strictEqual(state.status, RECOVERY_STATES.ROLLED_BACK);
+
+  const restoredSession = await getSessionById(originalSession.id);
+  assert.ok(restoredSession);
+  assert.strictEqual(restoredSession.events.length, 1, "Rollback should restore the original session snapshot");
+});
+
+test("recovery: rollback removes sessions created during interrupted recovery", async () => {
+  const { createRecoveryService } = require("../src/services/recovery-service");
+  const { interruptRecoveryTracking, loadRecoveryState, RECOVERY_STATES } = require("../src/services/recovery-manager");
+  const { appendLine, ensureDir } = require("../src/utils/file-store");
+  const { EVENTS_LOG_FILE, SESSION_DIR } = require("../src/config");
+
+  await ensureDir(SESSION_DIR);
+
+  const clock = createTestEventClock();
+  const sessionA = createTestId("sess");
+  const sessionB = createTestId("sess");
+
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: sessionA,
+    playerName: "RollbackCleanCat_A",
+    type: "fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  }));
+
+  await appendLine(EVENTS_LOG_FILE, JSON.stringify({
+    sessionId: sessionB,
+    playerName: "RollbackCleanCat_B",
+    type: "golden_fish_caught",
+    id: createTestId("evt"),
+    occurredAt: clock(),
+    receivedAt: new Date().toISOString(),
+    payload: {}
+  }));
+
+  const service = await createRecoveryService({
+    dryRun: false,
+    createBackup: true,
+    enableTransaction: true,
+    onProgress: async (progress) => {
+      if (progress.phase === "processing_sessions" && progress.processedCount === 1) {
+        await interruptRecoveryTracking();
+      }
+    }
+  });
+
+  const report = await service.runRecovery();
+
+  assert.strictEqual(report.wasInterrupted, true);
+  assert.strictEqual(report.rollbackResult?.rolledBack, true);
+
+  const sessionFiles = await fsp.readdir(SESSION_DIR).catch(() => []);
+  assert.strictEqual(sessionFiles.length, 0, "Rollback should remove sessions created after the backup snapshot");
+
+  const state = await loadRecoveryState();
+  assert.strictEqual(state.status, RECOVERY_STATES.ROLLED_BACK);
 });
 
 test("recovery: large scale performance - 100 sessions with 50 events each", async () => {
