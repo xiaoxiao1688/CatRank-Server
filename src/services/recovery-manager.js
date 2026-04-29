@@ -1,20 +1,40 @@
 const path = require("path");
 const fsp = require("fs/promises");
+
 const {
   BACKUP_DIR,
   QUARANTINE_DIR,
   RECOVERY_REPORTS_DIR,
   RECOVERY_STATE_FILE,
   RECOVERY_TEMP_DIR,
+  RECOVERY_HISTORY_DIR,
+  RECOVERY_EVENT_LOG,
   SESSION_DIR,
   EVENTS_LOG_FILE,
   LEADERBOARD_FILE,
-  RECOVERY_TRANSACTION_MODE
+  RECOVERY_TRANSACTION_MODE,
+  OPERATION_DEFAULT_MAX_RETRIES,
+  OPERATION_DEFAULT_RETRY_DELAY_MS,
+  OPERATION_DEFAULT_TIMEOUT_MS,
+  OPERATION_DEFAULT_MAX_CONCURRENCY,
+  OPERATION_AUTO_ROLLBACK,
+  OPERATION_PERSIST_EVENTS
 } = require("../config");
 const { ensureDir, readJson, writeJsonAtomic } = require("../utils/file-store");
-const { createOperationManager, OPERATION_STATES } = require("./operation-manager");
+const { createOperationManager, OPERATION_STATES, OPERATION_EVENT_TYPES, DEFAULT_OPERATION_CONFIG } = require("./operation-manager");
 
 const RECOVERY_STATES = OPERATION_STATES;
+const RECOVERY_EVENT_TYPES = OPERATION_EVENT_TYPES;
+const RECOVERY_OPERATION_TYPE = "recovery";
+
+let recoveryServiceModule = null;
+
+async function getRecoveryService() {
+  if (!recoveryServiceModule) {
+    recoveryServiceModule = require("./recovery-service");
+  }
+  return recoveryServiceModule;
+}
 
 const recoveryOperationManager = createOperationManager({
   operationName: "recovery",
@@ -22,6 +42,8 @@ const recoveryOperationManager = createOperationManager({
   reportsDir: RECOVERY_REPORTS_DIR,
   stateFile: RECOVERY_STATE_FILE,
   tempDir: RECOVERY_TEMP_DIR,
+  historyDir: RECOVERY_HISTORY_DIR,
+  eventLogFile: RECOVERY_EVENT_LOG,
   transactionModeEnabled: RECOVERY_TRANSACTION_MODE,
   trackedResources: [
     {
@@ -43,6 +65,15 @@ const recoveryOperationManager = createOperationManager({
       backupPath: "leaderboard.json"
     }
   ],
+  defaultConfig: {
+    maxRetries: OPERATION_DEFAULT_MAX_RETRIES,
+    retryDelayMs: OPERATION_DEFAULT_RETRY_DELAY_MS,
+    timeoutMs: OPERATION_DEFAULT_TIMEOUT_MS,
+    concurrencyKey: "recovery",
+    maxConcurrency: OPERATION_DEFAULT_MAX_CONCURRENCY,
+    autoRollbackOnFailure: OPERATION_AUTO_ROLLBACK,
+    persistEvents: OPERATION_PERSIST_EVENTS
+  },
   resolveManifestItem(item) {
     if (!item || !item.type) {
       return null;
@@ -76,34 +107,50 @@ const recoveryOperationManager = createOperationManager({
   }
 });
 
-const {
-  generateTimestamp,
-  ensureOperationDirs,
-  createBackup,
-  listBackups,
-  restoreFromBackup,
-  saveOperationReport,
-  listOperationReports,
-  getOperationReport,
-  saveOperationState,
-  loadOperationState,
-  getCurrentOperationState,
-  setInterrupted,
-  isInterrupted,
-  updateProgress,
-  getCurrentProgress,
-  startOperationTracking,
-  completeOperationTracking,
-  interruptOperationTracking,
-  createTransaction,
-  rollbackTransaction,
-  getActiveTransactionId,
-  clearActiveTransaction,
-  getTransactionMode
-} = recoveryOperationManager;
+async function registerRecoveryOperation() {
+  if (recoveryOperationManager.getRegisteredOperation(RECOVERY_OPERATION_TYPE)) {
+    return;
+  }
+
+  recoveryOperationManager.registerOperation({
+    type: RECOVERY_OPERATION_TYPE,
+    handler: async ({ operation, progress, isInterrupted }) => {
+      const options = {
+        dryRun: operation.dryRun,
+        createBackup: operation.metadata?.createBackup !== false,
+        quarantineCorrupted: operation.metadata?.quarantineCorrupted !== false,
+        enableTransaction: operation.metadata?.enableTransaction !== false,
+        logFilePath: operation.metadata?.logFilePath || null,
+        onProgress: (p) => {
+          progress(p);
+        }
+      };
+
+      const serviceModule = await getRecoveryService();
+      const service = await serviceModule.createRecoveryService(options);
+      const report = await service.runRecovery();
+
+      return report;
+    },
+    rollbackHandler: async ({ operation, backupResult, progress }) => {
+      if (!backupResult || !backupResult.success) {
+        return { success: false, reason: "no_backup" };
+      }
+
+      const result = await recoveryOperationManager.restoreFromBackup(backupResult.backupId);
+      return result;
+    },
+    config: {
+      maxRetries: 0,
+      timeoutMs: OPERATION_DEFAULT_TIMEOUT_MS,
+      concurrencyKey: "recovery",
+      maxConcurrency: 1
+    }
+  });
+}
 
 async function ensureRecoveryDirs() {
-  await ensureOperationDirs();
+  await recoveryOperationManager.ensureOperationDirs();
   await ensureDir(QUARANTINE_DIR);
 }
 
@@ -114,7 +161,7 @@ async function quarantineCorruptedLogLines(corruptedLines, logFilePath = EVENTS_
 
   await ensureRecoveryDirs();
 
-  const timestamp = generateTimestamp();
+  const timestamp = recoveryOperationManager.generateTimestamp();
   const quarantineId = `log_corrupt_${timestamp}`;
   const quarantinePath = path.join(QUARANTINE_DIR, `${quarantineId}.json`);
 
@@ -143,7 +190,7 @@ async function quarantineCorruptedLogLines(corruptedLines, logFilePath = EVENTS_
 async function quarantineCorruptedSession(sessionId, reason, sessionData = null) {
   await ensureRecoveryDirs();
 
-  const timestamp = generateTimestamp();
+  const timestamp = recoveryOperationManager.generateTimestamp();
   const quarantineId = `session_${sessionId}_${timestamp}`;
   const quarantinePath = path.join(QUARANTINE_DIR, `${quarantineId}.json`);
 
@@ -203,47 +250,99 @@ async function listQuarantinedItems() {
 }
 
 async function saveRecoveryReport(report) {
-  return saveOperationReport(report);
+  return recoveryOperationManager.saveOperationReport(report);
 }
 
 async function listRecoveryReports() {
-  return listOperationReports();
+  return recoveryOperationManager.listOperationReports();
 }
 
 async function getRecoveryReport(reportId) {
-  return getOperationReport(reportId);
+  return recoveryOperationManager.getOperationReport(reportId);
 }
 
 async function saveRecoveryState(state) {
-  return saveOperationState(state);
+  return recoveryOperationManager.saveOperationState(state);
 }
 
 async function loadRecoveryState() {
-  return loadOperationState();
+  return recoveryOperationManager.loadOperationState();
 }
 
 function getCurrentRecoveryState() {
-  return getCurrentOperationState();
+  return recoveryOperationManager.getCurrentOperationState();
 }
 
 function isRecoveryInterrupted() {
-  return isInterrupted();
+  return recoveryOperationManager.isInterrupted();
 }
 
 async function startRecoveryTracking(options = {}) {
-  return startOperationTracking(options);
+  return recoveryOperationManager.startOperationTracking(options);
 }
 
 async function completeRecoveryTracking(report, options = {}) {
   if (typeof options === "boolean") {
-    return completeOperationTracking(report, { success: options });
+    return recoveryOperationManager.completeOperationTracking(report, { success: options });
   }
 
-  return completeOperationTracking(report, options);
+  return recoveryOperationManager.completeOperationTracking(report, options);
 }
 
 async function interruptRecoveryTracking() {
-  return interruptOperationTracking();
+  return recoveryOperationManager.interruptOperationTracking();
+}
+
+async function runRecoveryOperation(options = {}) {
+  await registerRecoveryOperation();
+
+  const {
+    dryRun = true,
+    createBackup: _createBackup = true,
+    quarantineCorrupted = true,
+    enableTransaction = true,
+    logFilePath = null,
+    metadata = {}
+  } = options;
+
+  return recoveryOperationManager.runOperation(RECOVERY_OPERATION_TYPE, {
+    dryRun,
+    metadata: {
+      ...metadata,
+      createBackup: _createBackup,
+      quarantineCorrupted,
+      enableTransaction,
+      logFilePath
+    }
+  });
+}
+
+function getRecoveryOperation(operationId) {
+  return recoveryOperationManager.getOperation(operationId);
+}
+
+function listActiveRecoveryOperations() {
+  return recoveryOperationManager.listActiveOperations();
+}
+
+async function cancelRecoveryOperation(operationId) {
+  return recoveryOperationManager.cancelOperation(operationId);
+}
+
+async function listRecoveryHistory(options = {}) {
+  return recoveryOperationManager.listOperationHistory(options);
+}
+
+async function getRecoveryHistory(operationId) {
+  return recoveryOperationManager.getOperationHistory(operationId);
+}
+
+async function readRecoveryEvents(options = {}) {
+  return recoveryOperationManager.readOperationEvents(options);
+}
+
+function onRecoveryEvent(eventType, listener) {
+  return recoveryOperationManager.onOperationEvent(eventType, listener);
 }
 
 async function validateRecoveryResult(eventsCount, sessionsCount, report) {
@@ -302,13 +401,18 @@ async function validateRecoveryResult(eventsCount, sessionsCount, report) {
   };
 }
 
+registerRecoveryOperation().catch(() => {});
+
 module.exports = {
   RECOVERY_STATES,
-  generateTimestamp,
+  RECOVERY_EVENT_TYPES,
+  RECOVERY_OPERATION_TYPE,
+  registerRecoveryOperation,
+  generateTimestamp: recoveryOperationManager.generateTimestamp,
   ensureRecoveryDirs,
-  createBackup,
-  listBackups,
-  restoreFromBackup,
+  createBackup: recoveryOperationManager.createBackup,
+  listBackups: recoveryOperationManager.listBackups,
+  restoreFromBackup: recoveryOperationManager.restoreFromBackup,
   quarantineCorruptedLogLines,
   quarantineCorruptedSession,
   listQuarantinedItems,
@@ -318,17 +422,37 @@ module.exports = {
   saveRecoveryState,
   loadRecoveryState,
   getCurrentRecoveryState,
-  setInterrupted,
+  setInterrupted: recoveryOperationManager.setInterrupted,
   isRecoveryInterrupted,
-  updateProgress,
-  getCurrentProgress,
+  updateProgress: recoveryOperationManager.updateProgress,
+  getCurrentProgress: recoveryOperationManager.getCurrentProgress,
   startRecoveryTracking,
   completeRecoveryTracking,
   interruptRecoveryTracking,
-  createTransaction,
-  rollbackTransaction,
-  getActiveTransactionId,
-  clearActiveTransaction,
+  createTransaction: recoveryOperationManager.createTransaction,
+  rollbackTransaction: recoveryOperationManager.rollbackTransaction,
+  getActiveTransactionId: recoveryOperationManager.getActiveTransactionId,
+  clearActiveTransaction: recoveryOperationManager.clearActiveTransaction,
   validateRecoveryResult,
-  getTransactionMode
+  getTransactionMode: recoveryOperationManager.getTransactionMode,
+  runRecoveryOperation,
+  getRecoveryOperation,
+  listActiveRecoveryOperations,
+  cancelRecoveryOperation,
+  listRecoveryHistory,
+  getRecoveryHistory,
+  readRecoveryEvents,
+  onRecoveryEvent,
+  registerOperation: recoveryOperationManager.registerOperation,
+  getRegisteredOperation: recoveryOperationManager.getRegisteredOperation,
+  listRegisteredOperations: recoveryOperationManager.listRegisteredOperations,
+  emitOperationEvent: recoveryOperationManager.emitOperationEvent,
+  onOperationEvent: recoveryOperationManager.onOperationEvent,
+  createOperation: recoveryOperationManager.createOperation,
+  updateOperation: recoveryOperationManager.updateOperation,
+  executeOperation: recoveryOperationManager.executeOperation,
+  listActiveOperations: recoveryOperationManager.listActiveOperations,
+  listOperationHistory: recoveryOperationManager.listOperationHistory,
+  getOperationHistory: recoveryOperationManager.getOperationHistory,
+  readOperationEvents: recoveryOperationManager.readOperationEvents
 };
