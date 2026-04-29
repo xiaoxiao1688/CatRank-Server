@@ -809,3 +809,582 @@ node --test tests/api.test.js
 node --test tests/concurrency.test.js
 node --test tests/core.test.js
 ```
+
+## 操作管理框架（Operation Manager Framework）
+
+### 概述
+
+新增的通用操作管理框架提供了统一的任务管理能力，支持多种操作类型（如 recovery、export、import）。
+
+### 核心功能
+
+#### 1. 任务注册系统
+
+操作类型可以通过 `registerOperation()` 注册到框架中，每个操作类型定义：
+- `handler`: 操作执行函数
+- `rollbackHandler`: 回滚函数（可选）
+- `config`: 配置（超时、重试、并发控制等）
+
+#### 2. 并发隔离机制
+
+基于 `concurrencyKey` 的并发控制：
+- 相同 `concurrencyKey` 的操作会排队执行
+- 可配置 `maxConcurrency` 控制最大并发数
+- 防止相同类型操作并发执行导致的数据竞争
+
+#### 3. 超时取消功能
+
+- 可配置 `timeoutMs` 定义操作超时时间
+- 超时后自动中断操作
+- 支持自定义中断检查（`isInterrupted()`）
+
+#### 4. 失败重试机制
+
+- 可配置 `maxRetries` 最大重试次数
+- 可配置 `retryDelayMs` 重试延迟
+- 支持自动回滚后重试
+
+#### 5. 操作历史查询
+
+所有操作都会持久化到历史目录，支持：
+- `listOperationHistory()` - 列出历史记录
+- `getOperationHistory()` - 获取单条历史详情
+- 历史记录包含完整的操作状态、报告、时间等信息
+
+#### 6. 统一事件流
+
+所有操作事件通过统一的事件发射器发射：
+- `onOperationEvent()` - 监听操作事件
+- `readOperationEvents()` - 读取持久化的事件日志
+- 事件类型：`STARTED`, `PROGRESS`, `COMPLETED`, `FAILED`, `CANCELLED`, `TIMED_OUT`, `ROLLING_BACK`, `ROLLED_BACK`
+
+### 操作状态
+
+```javascript
+const OPERATION_STATES = {
+  IDLE: "idle",           // 空闲
+  PENDING: "pending",     // 等待执行（队列中）
+  RUNNING: "running",     // 执行中
+  PAUSED: "paused",       // 已暂停
+  INTERRUPTED: "interrupted",  // 已中断
+  COMPLETED: "completed", // 已完成
+  FAILED: "failed",       // 已失败
+  ROLLING_BACK: "rolling_back", // 回滚中
+  ROLLED_BACK: "rolled_back",   // 已回滚
+  TIMED_OUT: "timed_out"  // 已超时
+};
+```
+
+### 默认配置
+
+```javascript
+const DEFAULT_OPERATION_CONFIG = {
+  maxRetries: 3,              // 最大重试次数
+  retryDelayMs: 1000,          // 重试延迟（毫秒）
+  timeoutMs: 300000,           // 超时时间（毫秒，默认 5 分钟）
+  concurrencyKey: null,        // 并发键（null 表示不隔离）
+  maxConcurrency: 1,           // 最大并发数
+  autoRollbackOnFailure: true, // 失败时自动回滚
+  persistEvents: true          // 持久化事件
+};
+```
+
+### 环境变量配置
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `OPERATION_DEFAULT_MAX_RETRIES` | 3 | 默认最大重试次数 |
+| `OPERATION_DEFAULT_RETRY_DELAY_MS` | 1000 | 默认重试延迟（毫秒） |
+| `OPERATION_DEFAULT_TIMEOUT_MS` | 300000 | 默认超时时间（毫秒） |
+| `OPERATION_DEFAULT_MAX_CONCURRENCY` | 1 | 默认最大并发数 |
+| `OPERATION_AUTO_ROLLBACK` | true | 失败时自动回滚 |
+| `OPERATION_PERSIST_EVENTS` | true | 持久化事件到日志 |
+
+## Recovery 模块增强
+
+### 概述
+
+Recovery 模块已重构接入新的 Operation Manager 框架，获得所有框架能力：并发隔离、超时取消、失败重试、操作历史、事件流。
+
+### 新增 API 接口
+
+#### `GET /api/recovery/operations`
+
+列出当前活跃的 recovery 操作。
+
+响应：
+```json
+{
+  "ok": true,
+  "operations": [
+    {
+      "id": "op_xxx",
+      "type": "recovery",
+      "state": "running",
+      "dryRun": false,
+      "createdAt": "2026-04-27T00:00:00.000Z",
+      "progress": {
+        "phase": "scanning",
+        "total": 100,
+        "current": 45
+      }
+    }
+  ]
+}
+```
+
+#### `GET /api/recovery/operations/:operationId`
+
+获取单个操作详情。
+
+#### `POST /api/recovery/operations/:operationId/cancel`
+
+取消正在执行的操作。
+
+响应：
+```json
+{
+  "ok": true,
+  "operationId": "op_xxx",
+  "state": "interrupted"
+}
+```
+
+#### `GET /api/recovery/history`
+
+列出 recovery 操作历史。
+
+查询参数：
+- `limit`: 返回数量限制，默认 20
+- `offset`: 偏移量，默认 0
+
+响应：
+```json
+{
+  "ok": true,
+  "history": [
+    {
+      "id": "op_xxx",
+      "type": "recovery",
+      "state": "completed",
+      "dryRun": true,
+      "createdAt": "2026-04-27T00:00:00.000Z",
+      "completedAt": "2026-04-27T00:01:30.000Z",
+      "report": {
+        "summary": { "totalSessions": 10, "recovered": 8 }
+      }
+    }
+  ],
+  "total": 42
+}
+```
+
+#### `GET /api/recovery/history/:operationId`
+
+获取单条历史详情。
+
+#### `GET /api/recovery/events`
+
+读取 recovery 事件流。
+
+查询参数：
+- `limit`: 返回数量限制，默认 100
+- `offset`: 偏移量，默认 0
+
+响应：
+```json
+{
+  "ok": true,
+  "events": [
+    {
+      "timestamp": "2026-04-27T00:00:00.000Z",
+      "type": "started",
+      "operationId": "op_xxx",
+      "operationType": "recovery",
+      "data": { "dryRun": false }
+    }
+  ]
+}
+```
+
+### Recovery 目录结构
+
+```text
+data/
+  backups/              # 操作前备份
+  recovery-reports/     # Recovery 报告
+  recovery-state.json   # 操作状态
+  recovery-temp/        # 临时文件
+  recovery-history/     # 操作历史
+    op_xxx.json
+  recovery-events.log   # 事件日志
+  quarantine/           # 隔离的损坏文件
+```
+
+## 数据导出/导入（Export/Import）
+
+### 概述
+
+新增完整的数据导出/导入功能，支持：
+- 完整数据备份（sessions、events log、leaderboard）
+- 可选 gzip 压缩
+- 多种合并策略（跳过、覆盖、合并）
+- 操作前自动备份
+- 失败自动回滚
+
+### 导出功能
+
+#### `POST /api/export-import/export`
+
+执行数据导出。
+
+请求体（可选）：
+```json
+{
+  "compress": true,
+  "includeSessions": true,
+  "includeEvents": true,
+  "includeLeaderboard": true
+}
+```
+
+- `compress`: 是否压缩，默认 true
+- `includeSessions`: 是否包含会话数据，默认 true
+- `includeEvents`: 是否包含事件日志，默认 true
+- `includeLeaderboard`: 是否包含排行榜，默认 true
+
+响应：
+```json
+{
+  "ok": true,
+  "operationId": "exp_xxx",
+  "state": "running"
+}
+```
+
+#### `GET /api/export-import/exports`
+
+列出现有导出包。
+
+响应：
+```json
+{
+  "ok": true,
+  "exports": [
+    {
+      "id": "exp_20260427_000000",
+      "createdAt": "2026-04-27T00:00:00.000Z",
+      "size": 1048576,
+      "compressed": true,
+      "filename": "export_20260427_000000.tar.gz",
+      "manifest": {
+        "sessions": 50,
+        "events": 1500,
+        "leaderboardEntries": 30
+      }
+    }
+  ]
+}
+```
+
+#### `GET /api/export-import/exports/:exportId`
+
+获取导出详情。
+
+#### `DELETE /api/export-import/exports/:exportId`
+
+删除导出包。
+
+### 导入功能
+
+#### `POST /api/export-import/import/validate`
+
+验证导入包格式。
+
+请求体：
+```json
+{
+  "filePath": "path/to/export.tar.gz",
+  "strategy": "merge"
+}
+```
+
+- `filePath`: 导入包路径（相对于 imports 目录）
+- `strategy`: 合并策略
+  - `skip_existing`: 跳过已存在的数据（默认）
+  - `overwrite`: 覆盖已存在的数据
+  - `merge`: 合并数据
+
+响应：
+```json
+{
+  "ok": true,
+  "valid": true,
+  "manifest": {
+    "version": "1.0",
+    "createdAt": "2026-04-27T00:00:00.000Z",
+    "sessions": 50,
+    "events": 1500,
+    "leaderboardEntries": 30
+  }
+}
+```
+
+#### `POST /api/export-import/import`
+
+执行数据导入。
+
+请求体：
+```json
+{
+  "filePath": "export_20260427_000000.tar.gz",
+  "strategy": "merge",
+  "createBackup": true
+}
+```
+
+- `filePath`: 导入包文件名（必须在 imports 目录中）
+- `strategy`: 合并策略（同上）
+- `createBackup`: 导入前是否创建备份，默认 true
+
+响应：
+```json
+{
+  "ok": true,
+  "operationId": "imp_xxx",
+  "state": "running"
+}
+```
+
+#### `GET /api/export-import/imports`
+
+列出可用的导入源（imports 目录中的文件）。
+
+### 导出/导入操作管理
+
+#### `GET /api/export-import/operations/exports`
+
+列出活跃的导出操作。
+
+#### `GET /api/export-import/operations/imports`
+
+列出活跃的导入操作。
+
+#### `GET /api/export-import/operations/:operationId`
+
+获取操作详情。
+
+#### `POST /api/export-import/operations/:operationId/cancel`
+
+取消操作。
+
+### 导出/导入历史和事件
+
+#### `GET /api/export-import/history/exports`
+
+列出导出历史。
+
+#### `GET /api/export-import/history/imports`
+
+列出导入历史。
+
+#### `GET /api/export-import/events/exports`
+
+读取导出事件流。
+
+#### `GET /api/export-import/events/imports`
+
+读取导入事件流。
+
+### 备份恢复
+
+导入操作会自动创建备份，可以从备份恢复：
+
+#### `GET /api/export-import/backups/imports`
+
+列出导入操作的备份。
+
+#### `POST /api/export-import/backups/imports/:backupId/restore`
+
+从备份恢复。
+
+### 导出/导入目录结构
+
+```text
+data/
+  exports/              # 导出的包
+    export_20260427_000000.tar.gz
+  imports/              # 待导入的包
+    import_data.tar.gz
+  export-reports/       # 导出报告
+  export-state.json     # 导出操作状态
+  export-temp/          # 导出临时文件
+  export-history/       # 导出历史
+  export-events.log     # 导出事件日志
+  import-reports/       # 导入报告
+  import-state.json     # 导入操作状态
+  import-temp/          # 导入临时文件
+  import-history/       # 导入历史
+  import-events.log     # 导入事件日志
+```
+
+### 导出包格式
+
+导出包是一个 tar 归档（可选 gzip 压缩），包含：
+
+```text
+export_xxx.tar.gz
+├── manifest.json       # 元数据
+├── sessions/           # 会话文件
+│   ├── sess_xxx.json
+│   └── ...
+├── events.log          # 事件日志
+└── leaderboard.json    # 排行榜数据
+```
+
+manifest.json 格式：
+```json
+{
+  "version": "1.0",
+  "createdAt": "2026-04-27T00:00:00.000Z",
+  "compressed": true,
+  "content": {
+    "sessions": 50,
+    "events": 1500,
+    "leaderboardEntries": 30
+  },
+  "checksums": {
+    "sessions": "sha256:...",
+    "events.log": "sha256:...",
+    "leaderboard.json": "sha256:..."
+  }
+}
+```
+
+## 完整 API 清单
+
+### 核心 API
+- `GET /healthz` - 健康检查
+- `POST /api/sessions` - 创建会话
+- `GET /api/sessions/:sessionId` - 查询会话
+- `POST /api/sessions/:sessionId/start` - 启动会话
+- `POST /api/sessions/:sessionId/events` - 上报事件
+- `POST /api/sessions/:sessionId/finish` - 结束并结算
+- `POST /api/sessions/:sessionId/close` - 关闭会话
+- `POST /api/sessions/cleanup-expired` - 清理过期会话
+- `GET /api/leaderboard` - 排行榜查询
+
+### Recovery API
+- `POST /api/recovery/run` - 执行恢复
+- `GET /api/recovery/status` - 获取状态
+- `GET /api/recovery/reports` - 列出报告
+- `GET /api/recovery/reports/:reportId` - 获取报告详情
+- `GET /api/recovery/backups` - 列出备份
+- `POST /api/recovery/backups/:backupId/restore` - 从备份恢复
+- `GET /api/recovery/quarantine` - 列出隔离文件
+- `POST /api/recovery/interrupt` - 中断恢复
+- `GET /api/recovery/config` - 获取配置
+- `GET /api/recovery/operations` - 列出活跃操作
+- `GET /api/recovery/operations/:operationId` - 获取操作详情
+- `POST /api/recovery/operations/:operationId/cancel` - 取消操作
+- `GET /api/recovery/history` - 列出历史
+- `GET /api/recovery/history/:operationId` - 获取历史详情
+- `GET /api/recovery/events` - 读取事件流
+
+### Export/Import API
+- `GET /api/export-import/status` - 状态检查
+- `GET /api/export-import/config` - 获取配置
+- `POST /api/export-import/export` - 执行导出
+- `GET /api/export-import/exports` - 列出现有导出
+- `GET /api/export-import/exports/:exportId` - 获取导出详情
+- `DELETE /api/export-import/exports/:exportId` - 删除导出
+- `POST /api/export-import/import/validate` - 验证导入包
+- `POST /api/export-import/import` - 执行导入
+- `GET /api/export-import/imports` - 列出导入源
+- `GET /api/export-import/operations/exports` - 列出活跃导出操作
+- `GET /api/export-import/operations/imports` - 列出活跃导入操作
+- `GET /api/export-import/operations/:operationId` - 获取操作详情
+- `POST /api/export-import/operations/:operationId/cancel` - 取消操作
+- `GET /api/export-import/history/exports` - 列出导出历史
+- `GET /api/export-import/history/imports` - 列出导入历史
+- `GET /api/export-import/history/:operationId` - 获取历史详情
+- `GET /api/export-import/events/exports` - 读取导出事件
+- `GET /api/export-import/events/imports` - 读取导入事件
+- `GET /api/export-import/backups/imports` - 列出导入备份
+- `POST /api/export-import/backups/imports/:backupId/restore` - 从备份恢复
+
+## 测试结果
+
+### 测试统计
+
+```
+✅ 测试总数: 72
+✅ 通过: 72
+❌ 失败: 0
+⏱️ 总耗时: ~16-20 秒
+```
+
+### 测试用例分类
+
+#### API 测试（16 个）
+- 会话创建、启动、事件上报、结算、关闭
+- 过期处理、重复提交防护
+- 状态机边界验证
+- 排行榜分页
+
+#### 并发测试（6 个）
+- 并发结算（只有 1 次成功）
+- 并发事件（全部保存）
+- 原子性保证
+- 多 session 隔离
+
+#### 核心测试（21 个）
+- 状态机转换
+- Session 服务
+- 分数计算
+- Leaderboard 服务
+
+#### Recovery 测试（29 个）
+- 会话文件丢失恢复
+- 损坏日志检测
+- 重复事件检测
+- 状态冲突检测
+- 重复入榜防护
+- dry-run 模式
+- 隔离功能
+- 备份创建和恢复
+- 事务和回滚
+- 性能测试（100 会话，5000 事件）
+
+### 运行测试
+
+```bash
+# 运行所有测试
+npm test
+
+# 运行单个测试文件
+node --test tests/recovery.test.js
+node --test tests/api.test.js
+node --test tests/concurrency.test.js
+node --test tests/core.test.js
+```
+
+## 新增/修改文件清单
+
+### 新增文件
+
+| 文件 | 说明 |
+|------|------|
+| `src/services/operation-manager.js` | 通用操作管理框架（核心） |
+| `src/services/export-import-manager.js` | 数据导出/导入服务 |
+| `src/routes/export-import.js` | 导出/导入 API 路由 |
+
+### 修改文件
+
+| 文件 | 修改内容 |
+|------|----------|
+| `src/config.js` | 新增操作管理、导出/导入配置参数 |
+| `src/services/recovery-manager.js` | 重构接入 Operation Manager 框架 |
+| `src/routes/recovery.js` | 新增操作管理、历史、事件流 API |
+| `src/app.js` | 集成 export-import 路由 |
+| `README.md` | 新增框架说明、API 文档、测试结果 |

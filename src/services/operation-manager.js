@@ -1,18 +1,107 @@
 const path = require("path");
 const fsp = require("fs/promises");
+const events = require("events");
 
-const { ensureDir, readJson, writeJsonAtomic } = require("../utils/file-store");
+const { ensureDir, readJson, writeJsonAtomic, appendLine } = require("../utils/file-store");
 const { createId } = require("../utils/id");
 
 const OPERATION_STATES = {
   IDLE: "idle",
+  PENDING: "pending",
   RUNNING: "running",
+  PAUSED: "paused",
   INTERRUPTED: "interrupted",
   COMPLETED: "completed",
   FAILED: "failed",
   ROLLING_BACK: "rolling_back",
-  ROLLED_BACK: "rolled_back"
+  ROLLED_BACK: "rolled_back",
+  TIMED_OUT: "timed_out"
 };
+
+const OPERATION_EVENT_TYPES = {
+  CREATED: "operation.created",
+  STARTED: "operation.started",
+  PROGRESS: "operation.progress",
+  PAUSED: "operation.paused",
+  RESUMED: "operation.resumed",
+  INTERRUPTED: "operation.interrupted",
+  COMPLETED: "operation.completed",
+  FAILED: "operation.failed",
+  TIMED_OUT: "operation.timed_out",
+  ROLLING_BACK: "operation.rolling_back",
+  ROLLED_BACK: "operation.rolled_back",
+  RETRY_SCHEDULED: "operation.retry_scheduled",
+  RETRY_STARTED: "operation.retry_started"
+};
+
+const DEFAULT_OPERATION_CONFIG = {
+  maxRetries: 3,
+  retryDelayMs: 1000,
+  timeoutMs: 300000,
+  concurrencyKey: null,
+  maxConcurrency: 1,
+  autoRollbackOnFailure: true,
+  persistEvents: true
+};
+
+const operationRegistry = new Map();
+const operationEventEmitter = new events.EventEmitter();
+const activeOperations = new Map();
+const concurrencyQueues = new Map();
+const operationTimers = new Map();
+
+function generateTimestamp() {
+  return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+async function pathExists(targetPath) {
+  try {
+    await fsp.access(targetPath);
+    return true;
+  } catch (error) {
+    if (error.code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function copyDirectory(sourceDir, targetDir) {
+  await ensureDir(targetDir);
+  const entries = await fsp.readdir(sourceDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+
+    if (entry.isDirectory()) {
+      await copyDirectory(sourcePath, targetPath);
+      continue;
+    }
+
+    await ensureDir(path.dirname(targetPath));
+    await fsp.copyFile(sourcePath, targetPath);
+  }
+}
+
+async function removePath(targetPath) {
+  await fsp.rm(targetPath, { recursive: true, force: true });
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getConcurrencyQueue(concurrencyKey) {
+  if (!concurrencyQueues.has(concurrencyKey)) {
+    concurrencyQueues.set(concurrencyKey, {
+      active: 0,
+      queue: [],
+      maxConcurrency: 1
+    });
+  }
+  return concurrencyQueues.get(concurrencyKey);
+}
 
 function createOperationManager(options) {
   const {
@@ -21,11 +110,15 @@ function createOperationManager(options) {
     reportsDir,
     stateFile,
     tempDir,
+    historyDir,
+    eventLogFile,
     transactionModeEnabled = true,
     trackedResources = [],
-    resolveManifestItem = null
+    resolveManifestItem = null,
+    defaultConfig = {}
   } = options;
 
+  const managerDefaultConfig = { ...DEFAULT_OPERATION_CONFIG, ...defaultConfig };
   const resources = trackedResources.map((resource) => ({
     ...resource,
     backupPath: resource.backupPath || resource.key
@@ -36,44 +129,7 @@ function createOperationManager(options) {
   let currentProgress = null;
   let interrupted = false;
   let activeTransaction = null;
-
-  function generateTimestamp() {
-    return new Date().toISOString().replace(/[:.]/g, "-");
-  }
-
-  async function pathExists(targetPath) {
-    try {
-      await fsp.access(targetPath);
-      return true;
-    } catch (error) {
-      if (error.code === "ENOENT") {
-        return false;
-      }
-      throw error;
-    }
-  }
-
-  async function copyDirectory(sourceDir, targetDir) {
-    await ensureDir(targetDir);
-    const entries = await fsp.readdir(sourceDir, { withFileTypes: true });
-
-    for (const entry of entries) {
-      const sourcePath = path.join(sourceDir, entry.name);
-      const targetPath = path.join(targetDir, entry.name);
-
-      if (entry.isDirectory()) {
-        await copyDirectory(sourcePath, targetPath);
-        continue;
-      }
-
-      await ensureDir(path.dirname(targetPath));
-      await fsp.copyFile(sourcePath, targetPath);
-    }
-  }
-
-  async function removePath(targetPath) {
-    await fsp.rm(targetPath, { recursive: true, force: true });
-  }
+  let currentOperationId = null;
 
   function buildBackupStatePath(backupId) {
     return path.join(backupDir, backupId);
@@ -83,6 +139,7 @@ function createOperationManager(options) {
     await ensureDir(backupDir);
     await ensureDir(reportsDir);
     await ensureDir(tempDir);
+    if (historyDir) await ensureDir(historyDir);
   }
 
   async function snapshotResource(backupPath, resource, manifest) {
@@ -637,8 +694,576 @@ function createOperationManager(options) {
     };
   }
 
+  function registerOperation(operationDef) {
+    const {
+      type,
+      handler,
+      rollbackHandler = null,
+      config = {}
+    } = operationDef;
+
+    if (operationRegistry.has(type)) {
+      throw new Error(`Operation type '${type}' is already registered`);
+    }
+
+    const fullConfig = { ...managerDefaultConfig, ...config };
+
+    operationRegistry.set(type, {
+      type,
+      handler,
+      rollbackHandler,
+      config: fullConfig
+    });
+
+    return {
+      type,
+      config: fullConfig
+    };
+  }
+
+  function getRegisteredOperation(type) {
+    return operationRegistry.get(type) || null;
+  }
+
+  function listRegisteredOperations() {
+    return Array.from(operationRegistry.entries()).map(([type, def]) => ({
+      type,
+      config: def.config
+    }));
+  }
+
+  function emitOperationEvent(eventType, operationId, data = {}) {
+    const event = {
+      id: createId("evt"),
+      type: eventType,
+      operationId,
+      operationType: operationName,
+      timestamp: new Date().toISOString(),
+      data
+    };
+
+    operationEventEmitter.emit(eventType, event);
+    operationEventEmitter.emit("*", event);
+
+    if (eventLogFile && managerDefaultConfig.persistEvents) {
+      appendLine(eventLogFile, JSON.stringify(event)).catch(() => {});
+    }
+  }
+
+  function onOperationEvent(eventType, listener) {
+    operationEventEmitter.on(eventType, listener);
+    return () => operationEventEmitter.off(eventType, listener);
+  }
+
+  async function createOperation(type, options = {}) {
+    const operationDef = getRegisteredOperation(type);
+    if (!operationDef) {
+      throw new Error(`Operation type '${type}' is not registered`);
+    }
+
+    const operationId = `op_${generateTimestamp()}_${createId("op")}`;
+    const config = { ...operationDef.config, ...options.config };
+
+    const operation = {
+      id: operationId,
+      type,
+      status: OPERATION_STATES.PENDING,
+      createdAt: new Date().toISOString(),
+      startedAt: null,
+      completedAt: null,
+      failedAt: null,
+      interruptedAt: null,
+      timeoutAt: null,
+      retries: 0,
+      maxRetries: config.maxRetries,
+      retryDelayMs: config.retryDelayMs,
+      timeoutMs: config.timeoutMs,
+      concurrencyKey: config.concurrencyKey || type,
+      maxConcurrency: config.maxConcurrency,
+      autoRollbackOnFailure: config.autoRollbackOnFailure,
+      dryRun: options.dryRun !== false,
+      progress: {
+        phase: "pending",
+        percent: 0,
+        message: `Operation ${type} pending execution`
+      },
+      result: null,
+      error: null,
+      backupResult: null,
+      rollbackResult: null,
+      metadata: options.metadata || {}
+    };
+
+    currentOperationId = operationId;
+    activeOperations.set(operationId, operation);
+    emitOperationEvent(OPERATION_EVENT_TYPES.CREATED, operationId, operation);
+
+    if (historyDir) {
+      const historyPath = path.join(historyDir, `${operationId}.json`);
+      await writeJsonAtomic(historyPath, operation);
+    }
+
+    return operation;
+  }
+
+  async function updateOperation(operationId, updates) {
+    const operation = activeOperations.get(operationId);
+    if (!operation) {
+      return null;
+    }
+
+    Object.assign(operation, updates, {
+      updatedAt: new Date().toISOString()
+    });
+
+    if (historyDir) {
+      const historyPath = path.join(historyDir, `${operationId}.json`);
+      await writeJsonAtomic(historyPath, operation).catch(() => {});
+    }
+
+    return operation;
+  }
+
+  function getOperation(operationId) {
+    return activeOperations.get(operationId) || null;
+  }
+
+  function listActiveOperations() {
+    return Array.from(activeOperations.values());
+  }
+
+  async function acquireConcurrencySlot(operation) {
+    const concurrencyKey = operation.concurrencyKey;
+    const queue = getConcurrencyQueue(concurrencyKey);
+
+    if (operation.maxConcurrency) {
+      queue.maxConcurrency = operation.maxConcurrency;
+    }
+
+    if (queue.active < queue.maxConcurrency) {
+      queue.active++;
+      return true;
+    }
+
+    return new Promise((resolve) => {
+      queue.queue.push(() => {
+        queue.active++;
+        resolve(true);
+      });
+    });
+  }
+
+  function releaseConcurrencySlot(concurrencyKey) {
+    const queue = getConcurrencyQueue(concurrencyKey);
+    queue.active--;
+
+    if (queue.queue.length > 0) {
+      const next = queue.queue.shift();
+      next();
+    }
+  }
+
+  function setTimeoutForOperation(operation) {
+    if (!operation.timeoutMs || operation.timeoutMs <= 0) {
+      return;
+    }
+
+    const timeoutId = setTimeout(async () => {
+      const currentOp = activeOperations.get(operation.id);
+      if (!currentOp || currentOp.status !== OPERATION_STATES.RUNNING) {
+        return;
+      }
+
+      await updateOperation(operation.id, {
+        status: OPERATION_STATES.TIMED_OUT,
+        timeoutAt: new Date().toISOString(),
+        progress: {
+          phase: "timed_out",
+          percent: currentOp.progress?.percent || 0,
+          message: `Operation timed out after ${operation.timeoutMs}ms`
+        }
+      });
+
+      emitOperationEvent(OPERATION_EVENT_TYPES.TIMED_OUT, operation.id, {
+        timeoutMs: operation.timeoutMs
+      });
+
+      setInterrupted(true);
+    }, operation.timeoutMs);
+
+    operationTimers.set(operation.id, timeoutId);
+  }
+
+  function clearTimeoutForOperation(operationId) {
+    const timeoutId = operationTimers.get(operationId);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      operationTimers.delete(operationId);
+    }
+  }
+
+  async function executeOperation(operation) {
+    const operationDef = getRegisteredOperation(operation.type);
+    if (!operationDef) {
+      throw new Error(`Operation type '${operation.type}' is not registered`);
+    }
+
+    await acquireConcurrencySlot(operation);
+
+    try {
+      await updateOperation(operation.id, {
+        status: OPERATION_STATES.RUNNING,
+        startedAt: new Date().toISOString(),
+        progress: {
+          phase: "starting",
+          percent: 0,
+          message: `Starting operation ${operation.type}...`
+        }
+      });
+
+      emitOperationEvent(OPERATION_EVENT_TYPES.STARTED, operation.id, operation);
+
+      setTimeoutForOperation(operation);
+
+      let backupResult = null;
+      if (transactionModeEnabled && operation.autoRollbackOnFailure && !operation.dryRun) {
+        await updateOperation(operation.id, {
+          progress: {
+            phase: "backing_up",
+            percent: 5,
+            message: "Creating backup before operation..."
+          }
+        });
+        backupResult = await createBackup(`pre-${operation.type}`);
+        await updateOperation(operation.id, { backupResult });
+      }
+
+      let result = null;
+      let lastError = null;
+
+      for (let attempt = 0; attempt <= operation.maxRetries; attempt++) {
+        try {
+          if (attempt > 0) {
+            emitOperationEvent(OPERATION_EVENT_TYPES.RETRY_STARTED, operation.id, {
+              attempt,
+              maxRetries: operation.maxRetries
+            });
+
+            await updateOperation(operation.id, {
+              retries: attempt,
+              progress: {
+                phase: "retrying",
+                percent: operation.progress?.percent || 0,
+                message: `Retry attempt ${attempt} of ${operation.maxRetries}...`
+              }
+            });
+          }
+
+          result = await operationDef.handler({
+            operation,
+            progress: (progress) => {
+              updateOperation(operation.id, { progress });
+              emitOperationEvent(OPERATION_EVENT_TYPES.PROGRESS, operation.id, progress);
+            },
+            isInterrupted: () => isInterrupted()
+          });
+
+          await updateOperation(operation.id, {
+            status: OPERATION_STATES.COMPLETED,
+            completedAt: new Date().toISOString(),
+            result,
+            progress: {
+              phase: "completed",
+              percent: 100,
+              message: `Operation ${operation.type} completed successfully`
+            }
+          });
+
+          emitOperationEvent(OPERATION_EVENT_TYPES.COMPLETED, operation.id, {
+            result
+          });
+
+          clearTimeoutForOperation(operation.id);
+          activeOperations.delete(operation.id);
+          releaseConcurrencySlot(operation.concurrencyKey);
+
+          return {
+            success: true,
+            operation: getOperation(operation.id) || operation,
+            result
+          };
+
+        } catch (error) {
+          lastError = error;
+
+          if (attempt < operation.maxRetries) {
+            emitOperationEvent(OPERATION_EVENT_TYPES.RETRY_SCHEDULED, operation.id, {
+              attempt: attempt + 1,
+              maxRetries: operation.maxRetries,
+              delayMs: operation.retryDelayMs
+            });
+
+            await delay(operation.retryDelayMs);
+          }
+        }
+      }
+
+      await updateOperation(operation.id, {
+        status: OPERATION_STATES.FAILED,
+        failedAt: new Date().toISOString(),
+        error: {
+          message: lastError.message,
+          stack: lastError.stack
+        },
+        progress: {
+          phase: "failed",
+          percent: operation.progress?.percent || 0,
+          message: `Operation failed: ${lastError.message}`
+        }
+      });
+
+      emitOperationEvent(OPERATION_EVENT_TYPES.FAILED, operation.id, {
+        error: lastError.message,
+        attempts: operation.retries + 1
+      });
+
+      if (operation.autoRollbackOnFailure && operationDef.rollbackHandler && backupResult?.success) {
+        await updateOperation(operation.id, {
+          status: OPERATION_STATES.ROLLING_BACK,
+          progress: {
+            phase: "rolling_back",
+            percent: operation.progress?.percent || 0,
+            message: "Rolling back operation..."
+          }
+        });
+
+        emitOperationEvent(OPERATION_EVENT_TYPES.ROLLING_BACK, operation.id, {});
+
+        try {
+          const rollbackResult = await operationDef.rollbackHandler({
+            operation,
+            backupResult,
+            progress: (progress) => {
+              updateOperation(operation.id, { progress });
+            }
+          });
+
+          await updateOperation(operation.id, {
+            status: OPERATION_STATES.ROLLED_BACK,
+            rollbackResult,
+            progress: {
+              phase: "rolled_back",
+              percent: 100,
+              message: "Operation rolled back successfully"
+            }
+          });
+
+          emitOperationEvent(OPERATION_EVENT_TYPES.ROLLED_BACK, operation.id, {
+            rollbackResult
+          });
+
+        } catch (rollbackError) {
+          await updateOperation(operation.id, {
+            rollbackError: rollbackError.message,
+            progress: {
+              phase: "rollback_failed",
+              percent: operation.progress?.percent || 0,
+              message: `Rollback failed: ${rollbackError.message}`
+            }
+          });
+        }
+      }
+
+      clearTimeoutForOperation(operation.id);
+      activeOperations.delete(operation.id);
+      releaseConcurrencySlot(operation.concurrencyKey);
+
+      return {
+        success: false,
+        operation: getOperation(operation.id) || operation,
+        error: lastError
+      };
+
+    } catch (error) {
+      clearTimeoutForOperation(operation.id);
+      activeOperations.delete(operation.id);
+      releaseConcurrencySlot(operation.concurrencyKey);
+
+      throw error;
+    }
+  }
+
+  async function runOperation(type, options = {}) {
+    const operation = await createOperation(type, options);
+    return executeOperation(operation);
+  }
+
+  async function cancelOperation(operationId) {
+    const operation = activeOperations.get(operationId);
+    if (!operation) {
+      return { success: false, reason: "operation_not_found" };
+    }
+
+    if (operation.status !== OPERATION_STATES.RUNNING && operation.status !== OPERATION_STATES.PENDING) {
+      return { success: false, reason: "operation_not_running" };
+    }
+
+    setInterrupted(true);
+    await updateOperation(operation.id, {
+      status: OPERATION_STATES.INTERRUPTED,
+      interruptedAt: new Date().toISOString(),
+      progress: {
+        phase: "interrupted",
+        percent: operation.progress?.percent || 0,
+        message: "Operation was interrupted"
+      }
+    });
+
+    emitOperationEvent(OPERATION_EVENT_TYPES.INTERRUPTED, operation.id, {});
+    clearTimeoutForOperation(operation.id);
+
+    return { success: true, operation: getOperation(operationId) };
+  }
+
+  async function listOperationHistory(options = {}) {
+    const { limit = 50, offset = 0, status = null, type = null } = options;
+
+    if (!historyDir) {
+      return {
+        success: true,
+        operations: [],
+        total: 0
+      };
+    }
+
+    try {
+      const files = await fsp.readdir(historyDir);
+      const operationFiles = files.filter(f => f.startsWith("op_") && f.endsWith(".json"));
+
+      let operations = [];
+
+      for (const file of operationFiles) {
+        try {
+          const filePath = path.join(historyDir, file);
+          const data = JSON.parse(await fsp.readFile(filePath, "utf-8"));
+
+          if (status && data.status !== status) continue;
+          if (type && data.type !== type) continue;
+
+          operations.push(data);
+        } catch {
+          continue;
+        }
+      }
+
+      operations.sort((a, b) => {
+        return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
+      });
+
+      const total = operations.length;
+      const paginated = operations.slice(offset, offset + limit);
+
+      return {
+        success: true,
+        operations: paginated,
+        total,
+        limit,
+        offset
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        operations: [],
+        total: 0
+      };
+    }
+  }
+
+  async function getOperationHistory(operationId) {
+    if (!historyDir) {
+      return {
+        success: false,
+        error: "history_dir_not_configured",
+        operation: null
+      };
+    }
+
+    const historyPath = path.join(historyDir, `${operationId}.json`);
+
+    try {
+      const operation = JSON.parse(await fsp.readFile(historyPath, "utf-8"));
+      return {
+        success: true,
+        operation
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        operation: null
+      };
+    }
+  }
+
+  async function readOperationEvents(options = {}) {
+    const { limit = 100, offset = 0, operationId = null, type = null } = options;
+
+    if (!eventLogFile) {
+      return {
+        success: true,
+        events: [],
+        total: 0
+      };
+    }
+
+    try {
+      const content = await fsp.readFile(eventLogFile, "utf-8");
+      const lines = content.split("\n").filter(line => line.trim());
+
+      let events = [];
+
+      for (const line of lines) {
+        try {
+          const event = JSON.parse(line);
+
+          if (operationId && event.operationId !== operationId) continue;
+          if (type && event.type !== type) continue;
+
+          events.push(event);
+        } catch {
+          continue;
+        }
+      }
+
+      events.sort((a, b) => {
+        return new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime();
+      });
+
+      const total = events.length;
+      const paginated = events.slice(offset, offset + limit);
+
+      return {
+        success: true,
+        events: paginated,
+        total,
+        limit,
+        offset
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        events: [],
+        total: 0
+      };
+    }
+  }
+
   return {
     OPERATION_STATES,
+    OPERATION_EVENT_TYPES,
+    DEFAULT_OPERATION_CONFIG,
     generateTimestamp,
     ensureOperationDirs,
     createBackup,
@@ -661,11 +1286,52 @@ function createOperationManager(options) {
     rollbackTransaction,
     getActiveTransactionId,
     clearActiveTransaction,
-    getTransactionMode
+    getTransactionMode,
+    registerOperation,
+    getRegisteredOperation,
+    listRegisteredOperations,
+    emitOperationEvent,
+    onOperationEvent,
+    createOperation,
+    updateOperation,
+    getOperation,
+    listActiveOperations,
+    executeOperation,
+    runOperation,
+    cancelOperation,
+    listOperationHistory,
+    getOperationHistory,
+    readOperationEvents,
+    acquireConcurrencySlot,
+    releaseConcurrencySlot,
+    setTimeoutForOperation,
+    clearTimeoutForOperation
   };
+}
+
+function getGlobalOperationRegistry() {
+  return {
+    register: (type, handler, config = {}) => {
+      if (operationRegistry.has(type)) {
+        throw new Error(`Operation type '${type}' is already registered`);
+      }
+      operationRegistry.set(type, { type, handler, config });
+      return { type, config };
+    },
+    list: () => Array.from(operationRegistry.keys()),
+    get: (type) => operationRegistry.get(type)
+  };
+}
+
+function getGlobalEventEmitter() {
+  return operationEventEmitter;
 }
 
 module.exports = {
   OPERATION_STATES,
-  createOperationManager
+  OPERATION_EVENT_TYPES,
+  DEFAULT_OPERATION_CONFIG,
+  createOperationManager,
+  getGlobalOperationRegistry,
+  getGlobalEventEmitter
 };

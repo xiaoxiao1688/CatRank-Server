@@ -12,6 +12,29 @@ const QUARANTINE_DIR = path.join(DATA_DIR, "quarantine");
 const RECOVERY_REPORTS_DIR = path.join(DATA_DIR, "recovery-reports");
 const RECOVERY_STATE_FILE = path.join(DATA_DIR, "recovery-state.json");
 const RECOVERY_TEMP_DIR = path.join(DATA_DIR, "recovery-temp");
+const RECOVERY_HISTORY_DIR = path.join(DATA_DIR, "recovery-history");
+const RECOVERY_EVENT_LOG = path.join(DATA_DIR, "recovery-events.log");
+
+const EXPORT_REPORTS_DIR = path.join(DATA_DIR, "export-reports");
+const EXPORT_STATE_FILE = path.join(DATA_DIR, "export-state.json");
+const EXPORT_TEMP_DIR = path.join(DATA_DIR, "export-temp");
+const EXPORT_HISTORY_DIR = path.join(DATA_DIR, "export-history");
+const EXPORT_EVENT_LOG = path.join(DATA_DIR, "export-events.log");
+const EXPORT_OUTPUT_DIR = path.join(DATA_DIR, "exports");
+
+const IMPORT_REPORTS_DIR = path.join(DATA_DIR, "import-reports");
+const IMPORT_STATE_FILE = path.join(DATA_DIR, "import-state.json");
+const IMPORT_TEMP_DIR = path.join(DATA_DIR, "import-temp");
+const IMPORT_HISTORY_DIR = path.join(DATA_DIR, "import-history");
+const IMPORT_EVENT_LOG = path.join(DATA_DIR, "import-events.log");
+const IMPORT_INPUT_DIR = path.join(DATA_DIR, "imports");
+
+const OPERATION_DEFAULT_MAX_RETRIES = parseEnvNumber("OPERATION_DEFAULT_MAX_RETRIES", 3);
+const OPERATION_DEFAULT_RETRY_DELAY_MS = parseEnvNumber("OPERATION_DEFAULT_RETRY_DELAY_MS", 1000);
+const OPERATION_DEFAULT_TIMEOUT_MS = parseEnvNumber("OPERATION_DEFAULT_TIMEOUT_MS", 300000);
+const OPERATION_DEFAULT_MAX_CONCURRENCY = parseEnvNumber("OPERATION_DEFAULT_MAX_CONCURRENCY", 1);
+const OPERATION_AUTO_ROLLBACK = parseEnvBoolean("OPERATION_AUTO_ROLLBACK", true);
+const OPERATION_PERSIST_EVENTS = parseEnvBoolean("OPERATION_PERSIST_EVENTS", true);
 
 function generateDefaultApiKey() {
   return crypto.randomBytes(32).toString("hex");
@@ -51,8 +74,28 @@ module.exports = {
   RECOVERY_REPORTS_DIR,
   RECOVERY_STATE_FILE,
   RECOVERY_TEMP_DIR,
+  RECOVERY_HISTORY_DIR,
+  RECOVERY_EVENT_LOG,
   RECOVERY_API_KEY,
   RECOVERY_REQUIRE_AUTH,
+  EXPORT_REPORTS_DIR,
+  EXPORT_STATE_FILE,
+  EXPORT_TEMP_DIR,
+  EXPORT_HISTORY_DIR,
+  EXPORT_EVENT_LOG,
+  EXPORT_OUTPUT_DIR,
+  IMPORT_REPORTS_DIR,
+  IMPORT_STATE_FILE,
+  IMPORT_TEMP_DIR,
+  IMPORT_HISTORY_DIR,
+  IMPORT_EVENT_LOG,
+  IMPORT_INPUT_DIR,
+  OPERATION_DEFAULT_MAX_RETRIES,
+  OPERATION_DEFAULT_RETRY_DELAY_MS,
+  OPERATION_DEFAULT_TIMEOUT_MS,
+  OPERATION_DEFAULT_MAX_CONCURRENCY,
+  OPERATION_AUTO_ROLLBACK,
+  OPERATION_PERSIST_EVENTS,
   SESSION_TTL_MS: parseEnvNumber("SESSION_TTL_MS", 15 * 60 * 1000),
   MAX_EVENTS_PER_SESSION: parseEnvNumber("MAX_EVENTS_PER_SESSION", 1000),
   MAX_EVENT_FUTURE_SKEW_MS: parseEnvNumber("MAX_EVENT_FUTURE_SKEW_MS", 30 * 1000),
