@@ -7,6 +7,7 @@ const {
   getOperationChain,
   listAllOperationChains,
   validateEvidenceChain,
+  validateEvidenceChainFull,
   validateAllEvidenceChains,
   getEvidenceByOperationId,
   exportEvidenceChain,
@@ -26,6 +27,11 @@ const listChainsSchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).optional().default(50),
   offset: z.coerce.number().int().min(0).optional().default(0),
   operationType: z.string().optional()
+});
+
+const listLogsSchema = z.object({
+  limit: z.coerce.number().int().min(1).max(1000).optional().default(100),
+  offset: z.coerce.number().int().min(0).optional().default(0)
 });
 
 const replaySchema = z.object({
@@ -67,9 +73,7 @@ function createEvidenceRouter() {
       enabled: true,
       state,
       highRiskOperations: HIGH_RISK_OPERATIONS,
-      evidenceTypes: Object.values(EVIDENCE_TYPES),
-      evidenceDir: EVIDENCE_DIR,
-      logFile: EVIDENCE_LOG_FILE
+      evidenceTypes: Object.values(EVIDENCE_TYPES)
     });
   }));
 
@@ -118,13 +122,12 @@ function createEvidenceRouter() {
     }
 
     const { operationId } = req.params;
-    const chain = await getOperationChain(operationId);
 
-    if (!chain) {
+    const validation = await validateEvidenceChainFull(operationId);
+
+    if (validation.issues.some(i => i.type === "chain_not_found")) {
       throw new HttpError(404, "Operation chain not found", { operationId });
     }
-
-    const validation = await validateEvidenceChain(chain);
 
     res.json({
       ok: true,
@@ -257,8 +260,8 @@ function createEvidenceRouter() {
       throw new HttpError(503, "Evidence chain is disabled");
     }
 
-    const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
-    const offset = parseInt(req.query.offset) || 0;
+    const params = listLogsSchema.parse(req.query);
+    const { limit, offset } = params;
 
     const result = await readLinesSafe(EVIDENCE_LOG_FILE);
     if (!result.ok) {

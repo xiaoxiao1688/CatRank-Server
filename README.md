@@ -2316,3 +2316,172 @@ node --test tests/evidence.test.js
 5. **异常检测**：自动检测链断裂、时间异常、参数不一致等问题
 6. **零侵入**：通过 Operation Manager 自动集成，无需修改业务代码
 7. **可配置**：支持禁用、调整时间容忍度、切换哈希算法
+
+### 修复记录（2026-05-02）
+
+#### 问题1：evidence status 接口不应返回服务端本地路径
+
+**修复前**：`GET /api/evidence/status` 接口返回 `evidenceDir` 和 `logFile` 等服务端本地路径，存在信息泄露风险。
+
+**修复后**：移除了敏感路径字段，响应中不再包含 `evidenceDir` 和 `logFile`。
+
+#### 问题2：logs 接口分页参数仍是手写解析，非法值要改成明确校验失败
+
+**修复前**：`GET /api/evidence/logs` 接口使用手写解析分页参数，使用 `parseInt` 和默认值，非法值（如 `limit=0`、`limit=-1`、`limit="abc"`）不会明确失败。
+
+**修复后**：新增 `listLogsSchema` 使用 zod 进行严格校验：
+- `limit`: 必须是 1-1000 之间的整数
+- `offset`: 必须是 >=0 的整数
+- 非法值会触发明确的 ZodError 校验失败
+
+#### 问题3：证据链校验要补 currentHash 重算比对，不能只查 prevHash
+
+**修复前**：`validateEvidenceChain` 只检查 `prevHash === prevEvent.currentHash`，没有验证 `currentHash` 本身是否由数据正确计算得出。如果攻击者篡改了证据数据并同时修改了 `prevHash` 链接，这种校验无法检测。
+
+**修复后**：
+- 新增 `rebuildEvidenceCurrentHash(evidence)` 函数：根据证据数据重新计算 `currentHash`
+- 新增 `validateEvidenceChainFull(operationId)` 函数：使用完整证据数据进行完整校验
+- 增强 `validateEvidenceChain(chain, fullEvidences)` 函数：接受可选的 `fullEvidences` 参数，当提供时进行 `currentHash` 重算比对
+- 新增检测类型 `hash_tampered`：当 `currentHash` 被篡改时触发
+
+**校验流程**：
+```
+1. 检查 prevHash === prevEvent.currentHash (链完整性)
+2. 检查时间戳顺序 (时间异常)
+3. [新增] 重算 currentHash 并比对 (数据篡改检测)
+```
+
+#### 问题4：回放逻辑要补状态重建校验，不能只返回事件列表
+
+**修复前**：`replayOperationFromEvidence` 只返回事件列表，没有进行状态流转验证、哈希验证等。
+
+**修复后**：
+- 新增 `VALID_STATE_TRANSITIONS`：定义合法的状态流转规则
+- 新增 `validateStateTransition(previousState, currentState)`：验证状态流转是否合法
+- 增强回放逻辑：
+  - 自动执行完整的证据链校验（可通过 `validateChain: false` 跳过）
+  - 逐步骤验证状态流转合法性
+  - 逐步骤验证哈希链完整性
+  - 逐步骤重算并验证 `currentHash`
+  - 生成 `stateReconstruction` 对象：包含初始状态、最终状态、所有转换记录
+  - 生成 `validationIssues`：记录所有验证问题
+
+**状态流转规则**：
+```
+null → pending → running → completed
+                        ↘ failed → rolling_back → rolled_back
+                        ↘ interrupted
+                        ↘ timed_out
+               ↘ interrupted
+         running → paused → running
+```
+
+#### 问题5：operation manager 的证据记录要补业务关键字段摘要
+
+**修复前**：`recordStateChangeEvidence` 只记录基本参数，缺少业务关键信息。
+
+**修复后**：新增 `businessSummary` 字段，包含以下业务关键字段：
+- `operationType`: 操作类型
+- `dryRun`: 是否为试运行模式
+- `autoRollbackOnFailure`: 失败时是否自动回滚
+- `maxRetries`: 最大重试次数
+- `retries`: 当前重试次数
+- `timeoutMs`: 超时时间（毫秒）
+- `concurrencyKey`: 并发控制键
+- `maxConcurrency`: 最大并发数
+- `progress`: 进度信息
+- `createdAt`: 创建时间
+- `startedAt`: 开始时间
+- `completedAt`: 完成时间
+- `failedAt`: 失败时间
+
+#### 问题6：默认 check 脚本要纳入 evidence 新模块
+
+**修复前**：`npm run check` 脚本未包含 evidence 相关文件。
+
+**修复后**：更新 `package.json` 中的 `check` 脚本，新增以下文件检查：
+- `src/routes/evidence.js`: 证据链 API 路由
+- `src/routes/export-import.js`: 导出导入路由
+- `src/services/evidence-chain-service.js`: 证据链核心服务
+- `src/services/export-import-manager.js`: 导出导入管理器
+
+### 增强的测试用例
+
+新增以下测试用例覆盖修复的问题：
+
+| 测试用例 | 覆盖场景 |
+|---------|---------|
+| `rebuildEvidenceCurrentHash recalculates hash correctly` | 验证哈希重算功能 |
+| `validateEvidenceChainFull detects currentHash tampering` | 验证 currentHash 篡改检测 |
+| `validateStateTransition validates state transitions` | 验证状态流转规则 |
+| `replayOperationFromEvidence includes state reconstruction` | 验证回放包含状态重建 |
+| `replayOperationFromEvidence detects invalid state transitions` | 验证回放检测非法状态流转 |
+| `createEvidence includes business summary in parameters` | 验证业务摘要记录 |
+| `listLogsSchema validates pagination parameters` | 验证分页参数校验 |
+
+### 更新的响应格式
+
+#### 回放响应（增强版）
+
+```json
+{
+  "success": true,
+  "operationId": "op_xxx",
+  "operationType": "recovery",
+  "dryRun": true,
+  "finalState": "completed",
+  "eventCount": 3,
+  "canReplay": true,
+  "message": "Dry run completed - no actual changes made",
+  "validationIssues": [],
+  "stateReconstruction": {
+    "initialState": null,
+    "finalState": "completed",
+    "transitions": [
+      { "step": 1, "from": null, "to": "pending", "valid": true },
+      { "step": 2, "from": "pending", "to": "running", "valid": true },
+      { "step": 3, "from": "running", "to": "completed", "valid": true }
+    ],
+    "valid": true
+  },
+  "replayLog": [
+    {
+      "step": 1,
+      "evidenceId": "evid_xxx",
+      "eventType": "operation_created",
+      "targetState": "pending",
+      "validation": {
+        "step": 1,
+        "evidenceId": "evid_xxx",
+        "checks": [
+          { "type": "state_transition", "valid": true, "from": null, "to": "pending" },
+          { "type": "hash_chain", "valid": true },
+          { "type": "current_hash", "valid": true }
+        ]
+      }
+    }
+  ]
+}
+```
+
+#### 校验响应（增强版）
+
+```json
+{
+  "ok": true,
+  "operationId": "op_xxx",
+  "valid": true,
+  "issues": [],
+  "warnings": [],
+  "details": {
+    "eventCount": 3,
+    "validCount": 3,
+    "invalidCount": 0,
+    "hashValidation": {
+      "attempted": 3,
+      "valid": 3,
+      "invalid": 0
+    }
+  }
+}
+```
