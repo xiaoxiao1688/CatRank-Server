@@ -913,6 +913,22 @@ function createOperationManager(options) {
       return null;
     }
 
+    const businessSummary = {
+      operationType: operation.type,
+      dryRun: operation.dryRun,
+      autoRollbackOnFailure: operation.autoRollbackOnFailure,
+      maxRetries: operation.maxRetries,
+      retries: operation.retries,
+      timeoutMs: operation.timeoutMs,
+      concurrencyKey: operation.concurrencyKey,
+      maxConcurrency: operation.maxConcurrency,
+      progress: operation.progress,
+      createdAt: operation.createdAt,
+      startedAt: operation.startedAt,
+      completedAt: operation.completedAt,
+      failedAt: operation.failedAt
+    };
+
     return recordEvidence({
       operationType: operation.type,
       operationId,
@@ -922,10 +938,14 @@ function createOperationManager(options) {
       parameters: {
         dryRun: operation.dryRun,
         metadata: operation.metadata,
+        businessSummary,
         ...metadata.parameters
       },
-      result: metadata.result,
-      error: metadata.error
+      result: metadata.result || operation.result,
+      error: metadata.error || operation.error,
+      resultDigest: operation.result ? null : undefined,
+      backupResult: operation.backupResult,
+      rollbackResult: operation.rollbackResult
     });
   }
 

@@ -71,6 +71,46 @@ function buildEvidenceChainLink(prevHash, currentData) {
   return calculateHash(chainInput);
 }
 
+function rebuildEvidenceCurrentHash(evidence) {
+  const {
+    prevHash,
+    currentHash,
+    evidenceId,
+    operationType,
+    operationId,
+    eventType,
+    timestamp,
+    state,
+    previousState,
+    parameterDigest,
+    resultDigest,
+    errorDigest,
+    metadata = {},
+    parameters,
+    result,
+    error
+  } = evidence;
+
+  const evidenceData = {
+    evidenceId,
+    operationType,
+    operationId,
+    eventType,
+    timestamp,
+    state,
+    previousState,
+    parameterDigest,
+    resultDigest,
+    errorDigest,
+    metadata,
+    parameters: Object.keys(parameters || {}).length > 0 ? parameters : undefined,
+    result: result ? (typeof result === "object" ? result : { value: result }) : undefined,
+    error: error ? { message: error.message, stack: error.stack?.slice(0, 2000) } : undefined
+  };
+
+  return buildEvidenceChainLink(prevHash, evidenceData);
+}
+
 async function ensureEvidenceDirs() {
   await ensureDir(EVIDENCE_DIR);
   await ensureDir(path.join(EVIDENCE_DIR, "chains"));
@@ -237,7 +277,7 @@ async function listAllOperationChains(options = {}) {
   };
 }
 
-async function validateEvidenceChain(chain) {
+async function validateEvidenceChain(chain, fullEvidences = null) {
   const issues = [];
   const warnings = [];
 
@@ -246,13 +286,22 @@ async function validateEvidenceChain(chain) {
       valid: true,
       issues: [],
       warnings: [{ type: "empty_chain", message: "Chain has no events" }],
-      details: { eventCount: 0, validCount: 0, invalidCount: 0 }
+      details: { eventCount: 0, validCount: 0, invalidCount: 0, hashValidation: null }
     };
   }
 
   let validCount = 0;
   let invalidCount = 0;
   let prevTime = null;
+  let hashValidCount = 0;
+  let hashInvalidCount = 0;
+
+  const evidenceMap = new Map();
+  if (fullEvidences && fullEvidences.length > 0) {
+    for (const evidence of fullEvidences) {
+      evidenceMap.set(evidence.evidenceId, evidence);
+    }
+  }
 
   for (let i = 0; i < chain.events.length; i++) {
     const event = chain.events[i];
@@ -283,7 +332,7 @@ async function validateEvidenceChain(chain) {
           severity: "error",
           eventIndex,
           evidenceId: event.evidenceId,
-          message: `Hash chain broken at event ${eventIndex}`,
+          message: `Hash chain broken at event ${eventIndex} (prevHash mismatch)`,
           expectedHash: prevEvent.currentHash,
           actualHash: event.prevHash
         });
@@ -294,6 +343,34 @@ async function validateEvidenceChain(chain) {
     } else {
       validCount++;
     }
+
+    if (evidenceMap.size > 0) {
+      const fullEvidence = evidenceMap.get(event.evidenceId);
+      if (fullEvidence) {
+        const recalculatedHash = rebuildEvidenceCurrentHash(fullEvidence);
+        if (recalculatedHash !== event.currentHash) {
+          issues.push({
+            type: "hash_tampered",
+            severity: "error",
+            eventIndex,
+            evidenceId: event.evidenceId,
+            message: `Evidence ${event.evidenceId} currentHash has been tampered`,
+            expectedHash: recalculatedHash,
+            actualHash: event.currentHash
+          });
+          hashInvalidCount++;
+        } else {
+          hashValidCount++;
+        }
+      } else {
+        warnings.push({
+          type: "missing_evidence_data",
+          eventIndex,
+          evidenceId: event.evidenceId,
+          message: `Full evidence data not found for ${event.evidenceId}, cannot verify currentHash`
+        });
+      }
+    }
   }
 
   return {
@@ -303,17 +380,45 @@ async function validateEvidenceChain(chain) {
     details: {
       eventCount: chain.events.length,
       validCount,
-      invalidCount
+      invalidCount,
+      hashValidation: evidenceMap.size > 0 ? {
+        attempted: hashValidCount + hashInvalidCount,
+        valid: hashValidCount,
+        invalid: hashInvalidCount
+      } : null
     }
   };
 }
 
-async function validateAllEvidenceChains() {
+async function validateEvidenceChainFull(operationId) {
+  const chainResult = await getEvidenceByOperationId(operationId);
+  
+  if (!chainResult.success) {
+    return {
+      valid: false,
+      issues: [{ type: "chain_not_found", message: chainResult.error }],
+      warnings: [],
+      details: { eventCount: 0, validCount: 0, invalidCount: 0, hashValidation: null }
+    };
+  }
+
+  const chain = chainResult.chain;
+  const fullEvidences = chainResult.evidences;
+
+  return validateEvidenceChain(chain, fullEvidences);
+}
+
+async function validateAllEvidenceChains(useFullValidation = true) {
   const result = await listAllOperationChains({ limit: 10000 });
   const validationResults = [];
 
   for (const chain of result.chains) {
-    const validation = await validateEvidenceChain(chain);
+    let validation;
+    if (useFullValidation) {
+      validation = await validateEvidenceChainFull(chain.operationId);
+    } else {
+      validation = await validateEvidenceChain(chain);
+    }
     validationResults.push({
       operationId: chain.operationId,
       operationType: chain.operationType,
@@ -400,8 +505,28 @@ async function exportEvidenceChain(operationId) {
   };
 }
 
+const VALID_STATE_TRANSITIONS = {
+  null: ["pending"],
+  pending: ["running", "interrupted", "timed_out"],
+  running: ["completed", "failed", "interrupted", "timed_out", "paused"],
+  paused: ["running", "interrupted", "timed_out"],
+  failed: ["rolling_back", "interrupted"],
+  rolling_back: ["rolled_back", "failed"],
+  rolled_back: [],
+  completed: [],
+  interrupted: [],
+  timed_out: [],
+  idle: ["pending", "running"]
+};
+
+function validateStateTransition(previousState, currentState) {
+  const prev = previousState || null;
+  const validNextStates = VALID_STATE_TRANSITIONS[prev] || [];
+  return validNextStates.includes(currentState);
+}
+
 async function replayOperationFromEvidence(operationId, options = {}) {
-  const { dryRun = true, onProgress = null } = options;
+  const { dryRun = true, onProgress = null, validateChain = true } = options;
 
   const result = await getEvidenceByOperationId(operationId);
   if (!result.success) {
@@ -410,11 +535,35 @@ async function replayOperationFromEvidence(operationId, options = {}) {
 
   const evidences = result.evidences;
   const replayLog = [];
+  const validationIssues = [];
   let currentState = null;
+  let previousTime = null;
+  let previousHash = null;
+  let stateReconstruction = {
+    initialState: null,
+    finalState: null,
+    transitions: [],
+    valid: true
+  };
+
+  if (validateChain) {
+    const validation = await validateEvidenceChainFull(operationId);
+    if (!validation.valid) {
+      return {
+        success: false,
+        operationId,
+        operationType: result.operationType,
+        error: "Evidence chain validation failed",
+        validationIssues: validation.issues,
+        canReplay: false
+      };
+    }
+  }
 
   for (let i = 0; i < evidences.length; i++) {
     const evidence = evidences[i];
     const step = i + 1;
+    const eventIndex = i + 1;
 
     if (onProgress) {
       onProgress({
@@ -426,32 +575,150 @@ async function replayOperationFromEvidence(operationId, options = {}) {
       });
     }
 
+    const stepValidation = {
+      step,
+      evidenceId: evidence.evidenceId,
+      checks: []
+    };
+
+    const stateTransitionValid = validateStateTransition(currentState, evidence.state);
+    stepValidation.checks.push({
+      type: "state_transition",
+      valid: stateTransitionValid,
+      from: currentState,
+      to: evidence.state
+    });
+
+    if (!stateTransitionValid) {
+      validationIssues.push({
+        type: "invalid_state_transition",
+        severity: "error",
+        step,
+        evidenceId: evidence.evidenceId,
+        message: `Invalid state transition from ${currentState} to ${evidence.state}`,
+        from: currentState,
+        to: evidence.state
+      });
+    }
+
+    if (previousTime !== null) {
+      const currentTimeMs = new Date(evidence.timestamp).getTime();
+      const previousTimeMs = new Date(previousTime).getTime();
+      const timestampValid = currentTimeMs >= previousTimeMs - EVIDENCE_MAX_TIME_SKEW_MS;
+      stepValidation.checks.push({
+        type: "timestamp_order",
+        valid: timestampValid,
+        previous: previousTime,
+        current: evidence.timestamp
+      });
+
+      if (!timestampValid) {
+        validationIssues.push({
+          type: "timestamp_out_of_order",
+          severity: "error",
+          step,
+          evidenceId: evidence.evidenceId,
+          message: `Timestamp ${evidence.timestamp} is earlier than previous ${previousTime}`,
+          previous: previousTime,
+          current: evidence.timestamp
+        });
+      }
+    }
+
+    if (previousHash !== null && evidence.prevHash !== previousHash) {
+      stepValidation.checks.push({
+        type: "hash_chain",
+        valid: false,
+        expected: previousHash,
+        actual: evidence.prevHash
+      });
+      validationIssues.push({
+        type: "chain_broken",
+        severity: "error",
+        step,
+        evidenceId: evidence.evidenceId,
+        message: "Hash chain link is broken",
+        expected: previousHash,
+        actual: evidence.prevHash
+      });
+    } else {
+      stepValidation.checks.push({
+        type: "hash_chain",
+        valid: true
+      });
+    }
+
+    const recalculatedHash = rebuildEvidenceCurrentHash(evidence);
+    const hashValid = recalculatedHash === evidence.currentHash;
+    stepValidation.checks.push({
+      type: "current_hash",
+      valid: hashValid,
+      expected: recalculatedHash,
+      actual: evidence.currentHash
+    });
+
+    if (!hashValid) {
+      validationIssues.push({
+        type: "hash_tampered",
+        severity: "error",
+        step,
+        evidenceId: evidence.evidenceId,
+        message: "Current hash does not match recalculated hash",
+        expected: recalculatedHash,
+        actual: evidence.currentHash
+      });
+    }
+
+    stateReconstruction.transitions.push({
+      step,
+      evidenceId: evidence.evidenceId,
+      eventType: evidence.eventType,
+      from: currentState,
+      to: evidence.state,
+      valid: stateTransitionValid
+    });
+
     replayLog.push({
       step,
       evidenceId: evidence.evidenceId,
       eventType: evidence.eventType,
       timestamp: evidence.timestamp,
-      previousState: evidence.previousState,
+      previousState: currentState,
       targetState: evidence.state,
       parameters: evidence.parameters,
       parameterDigest: evidence.parameterDigest,
       result: evidence.result,
-      resultDigest: evidence.resultDigest
+      resultDigest: evidence.resultDigest,
+      validation: stepValidation
     });
 
+    if (i === 0) {
+      stateReconstruction.initialState = currentState;
+    }
     currentState = evidence.state;
+    previousTime = evidence.timestamp;
+    previousHash = evidence.currentHash;
   }
 
+  stateReconstruction.finalState = currentState;
+  stateReconstruction.valid = validationIssues.length === 0;
+
+  const hasErrors = validationIssues.some(i => i.severity === "error");
+
   return {
-    success: true,
+    success: !hasErrors,
     operationId,
     operationType: result.operationType,
     dryRun,
     finalState: currentState,
     eventCount: evidences.length,
     replayLog,
-    canReplay: true,
-    message: dryRun ? "Dry run completed - no actual changes made" : "Replay completed"
+    canReplay: !hasErrors,
+    validationIssues,
+    stateReconstruction,
+    message: hasErrors
+      ? "Replay validation failed - found issues in evidence chain"
+      : (dryRun ? "Dry run completed - no actual changes made" : "Replay completed")
   };
 }
 
@@ -493,10 +760,13 @@ async function verifyParameterConsistency(evidence, actualParameters) {
 module.exports = {
   EVIDENCE_TYPES,
   HIGH_RISK_OPERATIONS,
+  VALID_STATE_TRANSITIONS,
+  validateStateTransition,
   generateEvidenceId,
   calculateHash,
   calculateParameterDigest,
   buildEvidenceChainLink,
+  rebuildEvidenceCurrentHash,
   ensureEvidenceDirs,
   getLastEvidenceHash,
   createEvidence,
@@ -504,6 +774,7 @@ module.exports = {
   getOperationChain,
   listAllOperationChains,
   validateEvidenceChain,
+  validateEvidenceChainFull,
   validateAllEvidenceChains,
   getEvidenceByOperationId,
   exportEvidenceChain,

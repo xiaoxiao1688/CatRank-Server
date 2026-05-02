@@ -517,3 +517,222 @@ test("evidence chain: listAllOperationChains filters by operationType", async ()
   const importResult = await listAllOperationChains({ operationType: "import" });
   assert.strictEqual(importResult.total, 1, "Should have 1 import chain");
 });
+
+test("evidence chain: rebuildEvidenceCurrentHash recalculates hash correctly", async () => {
+  const { createEvidence, rebuildEvidenceCurrentHash } = require("../src/services/evidence-chain-service");
+
+  const evidence = await createEvidence({
+    operationType: "recovery",
+    operationId: "op_rebuild_test",
+    eventType: "operation_created",
+    state: "pending",
+    previousState: null,
+    parameters: { dryRun: true, test: "value" }
+  });
+
+  const recalculatedHash = rebuildEvidenceCurrentHash(evidence);
+  assert.strictEqual(recalculatedHash, evidence.currentHash, "Recalculated hash should match original");
+});
+
+test("evidence chain: validateEvidenceChainFull detects currentHash tampering", async () => {
+  const { createEvidence, getEvidenceByOperationId, validateEvidenceChain, rebuildEvidenceCurrentHash } = require("../src/services/evidence-chain-service");
+
+  const operationId = "op_full_validate_test";
+
+  const evidence1 = await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_created",
+    state: "pending",
+    previousState: null,
+    parameters: { step: 1 }
+  });
+
+  const evidence2 = await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_started",
+    state: "running",
+    previousState: "pending",
+    parameters: { step: 2 }
+  });
+
+  const chainResult = await getEvidenceByOperationId(operationId);
+  assert.strictEqual(chainResult.success, true, "Should succeed");
+
+  const validResult = await validateEvidenceChain(chainResult.chain, chainResult.evidences);
+  assert.strictEqual(validResult.valid, true, "Chain should be valid");
+  assert.strictEqual(validResult.details.hashValidation.valid, 2, "All hashes should be valid");
+
+  const tamperedChain = {
+    ...chainResult.chain,
+    events: chainResult.chain.events.map((e, idx) => {
+      if (idx === 1) {
+        return { ...e, currentHash: "invalid_hash_123" };
+      }
+      return e;
+    })
+  };
+
+  const invalidResult = await validateEvidenceChain(tamperedChain, chainResult.evidences);
+  assert.strictEqual(invalidResult.valid, false, "Chain should be invalid after tampering");
+  assert.strictEqual(invalidResult.issues.length, 1, "Should have one issue");
+  assert.strictEqual(invalidResult.issues[0].type, "hash_tampered", "Issue type should be hash_tampered");
+
+  const tamperedEvidence2 = {
+    ...evidence2,
+    parameters: { step: 999, malicious: "tampered" }
+  };
+  const tamperedEvidences2 = [evidence1, tamperedEvidence2];
+
+  const invalidResult2 = await validateEvidenceChain(chainResult.chain, tamperedEvidences2);
+  assert.strictEqual(invalidResult2.valid, false, "Chain should be invalid after tampering evidence data");
+  assert.strictEqual(invalidResult2.issues.length >= 1, true, "Should have at least one issue");
+  assert.ok(invalidResult2.issues.some(i => i.type === "hash_tampered"), "Should have hash_tampered issue");
+});
+
+test("evidence chain: validateStateTransition validates state transitions", async () => {
+  const { VALID_STATE_TRANSITIONS, validateStateTransition } = require("../src/services/evidence-chain-service");
+
+  assert.strictEqual(VALID_STATE_TRANSITIONS["null"][0], "pending", "Null should transition to pending");
+  assert.ok(VALID_STATE_TRANSITIONS["pending"].includes("running"), "Pending should transition to running");
+  assert.ok(VALID_STATE_TRANSITIONS["running"].includes("completed"), "Running should transition to completed");
+  assert.ok(VALID_STATE_TRANSITIONS["running"].includes("failed"), "Running should transition to failed");
+  assert.ok(VALID_STATE_TRANSITIONS["failed"].includes("rolling_back"), "Failed should transition to rolling_back");
+  assert.ok(VALID_STATE_TRANSITIONS["rolling_back"].includes("rolled_back"), "Rolling_back should transition to rolled_back");
+  assert.strictEqual(VALID_STATE_TRANSITIONS["completed"].length, 0, "Completed should have no transitions");
+  assert.strictEqual(VALID_STATE_TRANSITIONS["rolled_back"].length, 0, "Rolled_back should have no transitions");
+
+  assert.strictEqual(validateStateTransition(null, "pending"), true, "null -> pending should be valid");
+  assert.strictEqual(validateStateTransition("pending", "running"), true, "pending -> running should be valid");
+  assert.strictEqual(validateStateTransition("running", "completed"), true, "running -> completed should be valid");
+  assert.strictEqual(validateStateTransition("running", "failed"), true, "running -> failed should be valid");
+  assert.strictEqual(validateStateTransition("failed", "rolling_back"), true, "failed -> rolling_back should be valid");
+  assert.strictEqual(validateStateTransition("rolling_back", "rolled_back"), true, "rolling_back -> rolled_back should be valid");
+
+  assert.strictEqual(validateStateTransition("pending", "completed"), false, "pending -> completed should be invalid");
+  assert.strictEqual(validateStateTransition("running", "rolled_back"), false, "running -> rolled_back should be invalid");
+  assert.strictEqual(validateStateTransition("completed", "running"), false, "completed -> running should be invalid");
+});
+
+test("evidence chain: replayOperationFromEvidence includes state reconstruction", async () => {
+  const { createEvidence, replayOperationFromEvidence } = require("../src/services/evidence-chain-service");
+
+  const operationId = "op_replay_state_test";
+
+  await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_created",
+    state: "pending",
+    previousState: null,
+    parameters: { step: 1 }
+  });
+
+  await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_started",
+    state: "running",
+    previousState: "pending",
+    parameters: { step: 2 }
+  });
+
+  await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_completed",
+    state: "completed",
+    previousState: "running",
+    parameters: { step: 3 },
+    result: { recoveredCount: 5 }
+  });
+
+  const result = await replayOperationFromEvidence(operationId, { dryRun: true });
+
+  assert.strictEqual(result.success, true, "Replay should succeed");
+  assert.ok(result.stateReconstruction, "Should have stateReconstruction");
+  assert.strictEqual(result.stateReconstruction.initialState, null, "Initial state should be null");
+  assert.strictEqual(result.stateReconstruction.finalState, "completed", "Final state should be completed");
+  assert.strictEqual(result.stateReconstruction.transitions.length, 3, "Should have 3 transitions");
+  assert.strictEqual(result.stateReconstruction.valid, true, "State reconstruction should be valid");
+
+  assert.strictEqual(result.stateReconstruction.transitions[0].from, null, "First transition from null");
+  assert.strictEqual(result.stateReconstruction.transitions[0].to, "pending", "First transition to pending");
+  assert.strictEqual(result.stateReconstruction.transitions[1].from, "pending", "Second transition from pending");
+  assert.strictEqual(result.stateReconstruction.transitions[1].to, "running", "Second transition to running");
+  assert.strictEqual(result.stateReconstruction.transitions[2].from, "running", "Third transition from running");
+  assert.strictEqual(result.stateReconstruction.transitions[2].to, "completed", "Third transition to completed");
+
+  assert.ok(result.replayLog[0].validation, "First step should have validation");
+  assert.ok(result.replayLog[0].validation.checks, "Validation should have checks");
+});
+
+test("evidence chain: createEvidence includes business summary in parameters", async () => {
+  const { createEvidence } = require("../src/services/evidence-chain-service");
+
+  const businessSummary = {
+    operationType: "recovery",
+    dryRun: true,
+    autoRollbackOnFailure: true,
+    maxRetries: 3,
+    retries: 0,
+    timeoutMs: 30000,
+    concurrencyKey: "recovery",
+    maxConcurrency: 1
+  };
+
+  const evidence = await createEvidence({
+    operationType: "recovery",
+    operationId: "op_biz_summary_test",
+    eventType: "operation_created",
+    state: "pending",
+    previousState: null,
+    parameters: {
+      dryRun: true,
+      businessSummary,
+      test: "value"
+    }
+  });
+
+  assert.ok(evidence.parameters, "Should have parameters");
+  assert.ok(evidence.parameters.businessSummary, "Should have businessSummary");
+  assert.strictEqual(evidence.parameters.businessSummary.operationType, "recovery", "Business summary should have operationType");
+  assert.strictEqual(evidence.parameters.businessSummary.dryRun, true, "Business summary should have dryRun");
+  assert.strictEqual(evidence.parameters.businessSummary.autoRollbackOnFailure, true, "Business summary should have autoRollbackOnFailure");
+  assert.strictEqual(evidence.parameters.businessSummary.maxRetries, 3, "Business summary should have maxRetries");
+  assert.strictEqual(evidence.parameters.businessSummary.timeoutMs, 30000, "Business summary should have timeoutMs");
+});
+
+test("evidence chain: listLogsSchema validates pagination parameters", async () => {
+  const { z } = require("zod");
+
+  const listLogsSchema = z.object({
+    limit: z.coerce.number().int().min(1).max(1000).optional().default(100),
+    offset: z.coerce.number().int().min(0).optional().default(0)
+  });
+
+  const valid1 = listLogsSchema.parse({ limit: "50", offset: "0" });
+  assert.strictEqual(valid1.limit, 50, "Should parse valid limit");
+  assert.strictEqual(valid1.offset, 0, "Should parse valid offset");
+
+  const valid2 = listLogsSchema.parse({});
+  assert.strictEqual(valid2.limit, 100, "Should use default limit");
+  assert.strictEqual(valid2.offset, 0, "Should use default offset");
+
+  assert.throws(() => {
+    listLogsSchema.parse({ limit: "0" });
+  }, "Should reject limit 0");
+
+  assert.throws(() => {
+    listLogsSchema.parse({ limit: "1001" });
+  }, "Should reject limit > 1000");
+
+  assert.throws(() => {
+    listLogsSchema.parse({ offset: "-1" });
+  }, "Should reject negative offset");
+
+  assert.throws(() => {
+    listLogsSchema.parse({ limit: "abc" });
+  }, "Should reject non-numeric limit");
+});
