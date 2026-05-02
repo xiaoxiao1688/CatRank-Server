@@ -5,6 +5,7 @@ const { createSessionsRouter } = require("./routes/sessions");
 const { createLeaderboardRouter } = require("./routes/leaderboard");
 const { createRecoveryRouter } = require("./routes/recovery");
 const { createExportImportRouter } = require("./routes/export-import");
+const { createEvidenceRouter } = require("./routes/evidence");
 const { HttpError } = require("./utils/http-error");
 
 function isZodError(error) {
@@ -43,6 +44,7 @@ function createApp({ sessionService, leaderboardService }) {
   app.use("/api/leaderboard", createLeaderboardRouter({ leaderboardService }));
   app.use("/api/recovery", createRecoveryRouter());
   app.use("/api/export-import", createExportImportRouter());
+  app.use("/api/evidence", createEvidenceRouter());
 
   app.use((_req, res) => {
     res.status(404).json({

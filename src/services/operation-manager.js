@@ -4,6 +4,16 @@ const events = require("events");
 
 const { ensureDir, readJson, writeJsonAtomic, appendLine } = require("../utils/file-store");
 const { createId } = require("../utils/id");
+const { EVIDENCE_ENABLED } = require("../config");
+
+let evidenceChainService = null;
+
+async function getEvidenceChainService() {
+  if (!evidenceChainService) {
+    evidenceChainService = require("./evidence-chain-service");
+  }
+  return evidenceChainService;
+}
 
 const OPERATION_STATES = {
   IDLE: "idle",
@@ -798,6 +808,14 @@ function createOperationManager(options) {
     activeOperations.set(operationId, operation);
     emitOperationEvent(OPERATION_EVENT_TYPES.CREATED, operationId, operation);
 
+    await recordStateChangeEvidence(
+      operationId,
+      "operation_created",
+      OPERATION_STATES.PENDING,
+      null,
+      { parameters: { ...options.metadata } }
+    );
+
     if (historyDir) {
       const historyPath = path.join(historyDir, `${operationId}.json`);
       await writeJsonAtomic(historyPath, operation);
@@ -812,9 +830,51 @@ function createOperationManager(options) {
       return null;
     }
 
+    const previousState = operation.status;
+    const newState = updates.status;
+
     Object.assign(operation, updates, {
       updatedAt: new Date().toISOString()
     });
+
+    if (newState && newState !== previousState) {
+      let eventType = "state_change";
+      switch (newState) {
+        case OPERATION_STATES.RUNNING:
+          eventType = "operation_started";
+          break;
+        case OPERATION_STATES.COMPLETED:
+          eventType = "operation_completed";
+          break;
+        case OPERATION_STATES.FAILED:
+          eventType = "operation_failed";
+          break;
+        case OPERATION_STATES.ROLLING_BACK:
+          eventType = "operation_rolling_back";
+          break;
+        case OPERATION_STATES.ROLLED_BACK:
+          eventType = "operation_rolled_back";
+          break;
+        case OPERATION_STATES.INTERRUPTED:
+          eventType = "operation_interrupted";
+          break;
+        case OPERATION_STATES.TIMED_OUT:
+          eventType = "operation_timed_out";
+          break;
+      }
+
+      await recordStateChangeEvidence(
+        operationId,
+        eventType,
+        newState,
+        previousState,
+        {
+          parameters: { progress: updates.progress },
+          result: updates.result,
+          error: updates.error
+        }
+      );
+    }
 
     if (historyDir) {
       const historyPath = path.join(historyDir, `${operationId}.json`);
@@ -830,6 +890,43 @@ function createOperationManager(options) {
 
   function listActiveOperations() {
     return Array.from(activeOperations.values());
+  }
+
+  async function recordEvidence(options) {
+    if (!EVIDENCE_ENABLED) {
+      return null;
+    }
+
+    try {
+      const evidenceSvc = await getEvidenceChainService();
+      const evidence = await evidenceSvc.createEvidence(options);
+      return evidence;
+    } catch (error) {
+      console.error("[WARNING] Failed to record evidence:", error.message);
+      return null;
+    }
+  }
+
+  async function recordStateChangeEvidence(operationId, eventType, newState, previousState, metadata = {}) {
+    const operation = getOperation(operationId);
+    if (!operation) {
+      return null;
+    }
+
+    return recordEvidence({
+      operationType: operation.type,
+      operationId,
+      eventType,
+      state: newState,
+      previousState,
+      parameters: {
+        dryRun: operation.dryRun,
+        metadata: operation.metadata,
+        ...metadata.parameters
+      },
+      result: metadata.result,
+      error: metadata.error
+    });
   }
 
   async function acquireConcurrencySlot(operation) {
@@ -1305,7 +1402,9 @@ function createOperationManager(options) {
     acquireConcurrencySlot,
     releaseConcurrencySlot,
     setTimeoutForOperation,
-    clearTimeoutForOperation
+    clearTimeoutForOperation,
+    recordEvidence,
+    recordStateChangeEvidence
   };
 }
 
