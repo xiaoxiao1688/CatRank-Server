@@ -913,7 +913,7 @@ function createOperationManager(options) {
       return null;
     }
 
-    const businessSummary = {
+    const baseSummary = {
       operationType: operation.type,
       dryRun: operation.dryRun,
       autoRollbackOnFailure: operation.autoRollbackOnFailure,
@@ -927,6 +927,93 @@ function createOperationManager(options) {
       startedAt: operation.startedAt,
       completedAt: operation.completedAt,
       failedAt: operation.failedAt
+    };
+
+    let operationSpecificSummary = {};
+    const opType = operation.type;
+    const opMetadata = operation.metadata || {};
+
+    switch (opType) {
+      case "recovery":
+        operationSpecificSummary = {
+          recovery: {
+            createBackup: opMetadata.createBackup !== false,
+            quarantineCorrupted: opMetadata.quarantineCorrupted !== false,
+            enableTransaction: opMetadata.enableTransaction !== false,
+            logFilePath: opMetadata.logFilePath || null,
+            trackedResources: ["sessions", "events_log", "leaderboard"]
+          }
+        };
+        break;
+
+      case "import":
+        operationSpecificSummary = {
+          import: {
+            mergeStrategy: opMetadata.mergeStrategy || null,
+            skipExisting: opMetadata.skipExisting || false,
+            overwriteExisting: opMetadata.overwriteExisting || false,
+            validateBeforeImport: opMetadata.validateBeforeImport !== false,
+            targetSessionIds: opMetadata.targetSessionIds || null,
+            importSource: opMetadata.importSource || null,
+            trackedResources: ["sessions", "events_log", "leaderboard"]
+          }
+        };
+        break;
+
+      case "export":
+        operationSpecificSummary = {
+          export: {
+            exportFormat: opMetadata.exportFormat || "json",
+            includeSessions: opMetadata.includeSessions !== false,
+            includeEvents: opMetadata.includeEvents !== false,
+            includeLeaderboard: opMetadata.includeLeaderboard !== false,
+            targetSessionIds: opMetadata.targetSessionIds || null,
+            compressionEnabled: opMetadata.compressionEnabled || false,
+            exportDestination: opMetadata.exportDestination || null
+          }
+        };
+        break;
+
+      case "restore":
+        operationSpecificSummary = {
+          restore: {
+            backupId: opMetadata.backupId || null,
+            restorePoint: opMetadata.restorePoint || null,
+            includeSessions: opMetadata.includeSessions !== false,
+            includeEvents: opMetadata.includeEvents !== false,
+            includeLeaderboard: opMetadata.includeLeaderboard !== false,
+            createBackupBeforeRestore: opMetadata.createBackupBeforeRestore !== false
+          }
+        };
+        break;
+
+      case "delete":
+        operationSpecificSummary = {
+          delete: {
+            deleteType: opMetadata.deleteType || "session",
+            targetSessionIds: opMetadata.targetSessionIds || null,
+            deleteAll: opMetadata.deleteAll || false,
+            includeBackup: opMetadata.includeBackup || false,
+            createBackupBeforeDelete: opMetadata.createBackupBeforeDelete !== false,
+            affectedResources: opMetadata.affectedResources || null
+          }
+        };
+        break;
+
+      default:
+        operationSpecificSummary = {
+          generic: {
+            operationCategory: opMetadata.operationCategory || "unknown",
+            customFields: Object.keys(opMetadata).filter(k =>
+              !["createBackup", "dryRun", "timeoutMs", "maxRetries"].includes(k)
+            )
+          }
+        };
+    }
+
+    const businessSummary = {
+      ...baseSummary,
+      operationSpecific: operationSpecificSummary
     };
 
     return recordEvidence({

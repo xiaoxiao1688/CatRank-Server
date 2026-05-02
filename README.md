@@ -2485,3 +2485,701 @@ null → pending → running → completed
   }
 }
 ```
+
+### 错误类型与失败响应
+
+#### 错误类型定义
+
+证据链模块定义了以下错误类型：
+
+| 错误类型 | 说明 | HTTP 状态码 |
+|---------|------|------------|
+| `chain_not_found` | 操作链不存在 | 404 |
+| `evidence_not_found` | 证据不存在 | 404 |
+| `validation_failed` | 通用验证失败 | 422 |
+| `hash_tampered` | 哈希被篡改 | 422 |
+| `chain_broken` | 哈希链断裂 | 422 |
+| `timestamp_out_of_order` | 时间戳乱序 | 422 |
+| `invalid_state_transition` | 非法状态流转 | 422 |
+| `invalid_parameters` | 无效参数 | 422 |
+| `evidence_disabled` | 证据链已禁用 | 503 |
+
+#### 操作链不存在
+
+**请求**：
+```
+GET /api/evidence/chains/nonexistent_op_123
+```
+
+**响应**（404）：
+```json
+{
+  "ok": false,
+  "message": "Operation chain not found",
+  "details": {
+    "errorType": "chain_not_found",
+    "operationId": "nonexistent_op_123"
+  }
+}
+```
+
+#### 证据不存在
+
+**请求**：
+```
+GET /api/evidence/logs/nonexistent_evid_123
+```
+
+**响应**（404）：
+```json
+{
+  "ok": false,
+  "message": "Evidence not found",
+  "details": {
+    "errorType": "evidence_not_found",
+    "evidenceId": "nonexistent_evid_123"
+  }
+}
+```
+
+#### 参数校验失败
+
+**请求**：
+```
+GET /api/evidence/logs?limit=0&offset=-1
+```
+
+**响应**（422）：
+```json
+{
+  "ok": false,
+  "message": "Validation failed",
+  "details": {
+    "errorType": "invalid_parameters",
+    "issues": [
+      {
+        "field": "limit",
+        "message": "Number must be greater than or equal to 1",
+        "code": "too_small"
+      },
+      {
+        "field": "offset",
+        "message": "Number must be greater than or equal to 0",
+        "code": "too_small"
+      }
+    ]
+  }
+}
+```
+
+#### 回放失败 - 链不存在
+
+**请求**：
+```
+POST /api/evidence/replay/nonexistent_op_123
+Content-Type: application/json
+
+{
+  "dryRun": true
+}
+```
+
+**响应**（404）：
+```json
+{
+  "ok": false,
+  "message": "Operation chain not found",
+  "details": {
+    "errorType": "chain_not_found",
+    "operationId": "nonexistent_op_123"
+  }
+}
+```
+
+#### 回放失败 - 哈希被篡改
+
+**请求**：
+```
+POST /api/evidence/replay/op_tampered_001
+Content-Type: application/json
+
+{
+  "dryRun": true
+}
+```
+
+**响应**（200 OK，但 ok: false）：
+```json
+{
+  "ok": false,
+  "errorType": "hash_tampered",
+  "errorMessage": "Evidence hash has been tampered",
+  "operationId": "op_tampered_001",
+  "operationType": "recovery",
+  "canReplay": false,
+  "validationIssues": [
+    {
+      "type": "hash_tampered",
+      "severity": "error",
+      "evidenceId": "evid_abc123def",
+      "message": "Current hash does not match recalculated hash"
+    }
+  ],
+  "context": {
+    "totalIssues": 1,
+    "primaryIssue": {
+      "type": "hash_tampered",
+      "severity": "error",
+      "evidenceId": "evid_abc123def",
+      "step": 2
+    }
+  }
+}
+```
+
+#### 回放失败 - 哈希链断裂
+
+**请求**：
+```
+POST /api/evidence/replay/op_broken_001
+Content-Type: application/json
+
+{
+  "dryRun": true
+}
+```
+
+**响应**（200 OK，但 ok: false）：
+```json
+{
+  "ok": false,
+  "errorType": "chain_broken",
+  "errorMessage": "Hash chain link is broken",
+  "operationId": "op_broken_001",
+  "operationType": "import",
+  "canReplay": false,
+  "validationIssues": [
+    {
+      "type": "chain_broken",
+      "severity": "error",
+      "evidenceId": "evid_xyz789",
+      "message": "Hash chain link is broken"
+    }
+  ],
+  "context": {
+    "totalIssues": 1,
+    "primaryIssue": {
+      "type": "chain_broken",
+      "severity": "error",
+      "evidenceId": "evid_xyz789",
+      "step": 3
+    }
+  }
+}
+```
+
+#### 回放失败 - 非法状态流转
+
+**请求**：
+```
+POST /api/evidence/replay/op_invalid_state_001
+Content-Type: application/json
+
+{
+  "dryRun": true
+}
+```
+
+**响应**（200 OK，但 ok: false）：
+```json
+{
+  "ok": false,
+  "errorType": "invalid_state_transition",
+  "errorMessage": "Invalid state transition from pending to completed",
+  "operationId": "op_invalid_state_001",
+  "operationType": "export",
+  "canReplay": false,
+  "validationIssues": [
+    {
+      "type": "invalid_state_transition",
+      "severity": "error",
+      "evidenceId": "evid_invalid_001",
+      "message": "Invalid state transition from pending to completed"
+    }
+  ],
+  "context": {
+    "totalIssues": 1,
+    "primaryIssue": {
+      "type": "invalid_state_transition",
+      "severity": "error",
+      "evidenceId": "evid_invalid_001",
+      "step": 2
+    }
+  }
+}
+```
+
+#### 证据链禁用
+
+**请求**：
+```
+GET /api/evidence/chains
+```
+
+**响应**（503）：
+```json
+{
+  "ok": false,
+  "message": "Evidence chain is disabled",
+  "details": {
+    "errorType": "evidence_disabled"
+  }
+}
+```
+
+### 校验失败示例
+
+#### 完整校验 - 检测到哈希篡改
+
+**请求**：
+```
+POST /api/evidence/chains/op_tampered_001/validate
+```
+
+**响应**：
+```json
+{
+  "ok": true,
+  "operationId": "op_tampered_001",
+  "valid": false,
+  "issues": [
+    {
+      "type": "hash_tampered",
+      "severity": "error",
+      "evidenceId": "evid_abc123def",
+      "message": "Evidence evid_abc123def currentHash has been tampered"
+    }
+  ],
+  "warnings": [],
+  "details": {
+    "eventCount": 3,
+    "validCount": 2,
+    "invalidCount": 1,
+    "hashValidation": {
+      "attempted": 3,
+      "valid": 2,
+      "invalid": 1
+    }
+  }
+}
+```
+
+#### 完整校验 - 检测到链断裂
+
+**请求**：
+```
+POST /api/evidence/chains/op_broken_001/validate
+```
+
+**响应**：
+```json
+{
+  "ok": true,
+  "operationId": "op_broken_001",
+  "valid": false,
+  "issues": [
+    {
+      "type": "chain_broken",
+      "severity": "error",
+      "evidenceId": "evid_xyz789",
+      "message": "Hash chain broken at event 3 (prevHash mismatch)"
+    }
+  ],
+  "warnings": [],
+  "details": {
+    "eventCount": 4,
+    "validCount": 2,
+    "invalidCount": 1,
+    "hashValidation": {
+      "attempted": 4,
+      "valid": 4,
+      "invalid": 0
+    }
+  }
+}
+```
+
+#### 完整校验 - 检测到时间戳乱序
+
+**请求**：
+```
+POST /api/evidence/chains/op_timestamp_001/validate
+```
+
+**响应**：
+```json
+{
+  "ok": true,
+  "operationId": "op_timestamp_001",
+  "valid": false,
+  "issues": [
+    {
+      "type": "timestamp_out_of_order",
+      "severity": "error",
+      "evidenceId": "evid_time_002",
+      "message": "Event 2 timestamp 2026-05-02T09:00:00.000Z is earlier than previous event"
+    }
+  ],
+  "warnings": [],
+  "details": {
+    "eventCount": 3,
+    "validCount": 2,
+    "invalidCount": 1,
+    "hashValidation": {
+      "attempted": 3,
+      "valid": 3,
+      "invalid": 0
+    }
+  }
+}
+```
+
+#### 全链校验 - 返回失败链列表
+
+**请求**：
+```
+POST /api/evidence/validate-all
+```
+
+**响应**：
+```json
+{
+  "ok": true,
+  "total": 5,
+  "valid": 3,
+  "invalid": 2,
+  "failedChains": [
+    {
+      "operationId": "op_tampered_001",
+      "operationType": "recovery",
+      "issues": [
+        {
+          "type": "hash_tampered",
+          "severity": "error",
+          "evidenceId": "evid_abc123def",
+          "message": "Evidence evid_abc123def currentHash has been tampered"
+        }
+      ]
+    },
+    {
+      "operationId": "op_broken_001",
+      "operationType": "import",
+      "issues": [
+        {
+          "type": "chain_broken",
+          "severity": "error",
+          "evidenceId": "evid_xyz789",
+          "message": "Hash chain broken at event 3 (prevHash mismatch)"
+        }
+      ]
+    }
+  ]
+}
+```
+
+### 响应字段简化说明
+
+为减少响应结构过重，部分接口返回字段已简化：
+
+#### 链列表响应（简化）
+
+**`GET /api/evidence/chains`** 返回简化的链对象，不再包含完整的 `events` 数组中的哈希字段：
+
+```json
+{
+  "ok": true,
+  "chains": [
+    {
+      "operationId": "op_xxx",
+      "operationType": "recovery",
+      "createdAt": "2026-05-02T10:00:00.000Z",
+      "updatedAt": "2026-05-02T10:01:00.000Z",
+      "lastEvidenceId": "evid_xxx",
+      "lastHash": "abc123...",
+      "eventCount": 3
+    }
+  ],
+  "total": 42,
+  "limit": 50,
+  "offset": 0
+}
+```
+
+#### 链详情响应（简化）
+
+**`GET /api/evidence/chains/:operationId`** 返回简化的事件，只保留关键字段：
+
+```json
+{
+  "ok": true,
+  "operationId": "op_xxx",
+  "chain": {
+    "operationId": "op_xxx",
+    "operationType": "recovery",
+    "createdAt": "2026-05-02T10:00:00.000Z",
+    "updatedAt": "2026-05-02T10:01:00.000Z",
+    "lastEvidenceId": "evid_xxx",
+    "lastHash": "abc123...",
+    "events": [
+      {
+        "evidenceId": "evid_1",
+        "eventType": "operation_created",
+        "timestamp": "2026-05-02T10:00:00.000Z",
+        "state": "pending",
+        "previousState": null
+      },
+      {
+        "evidenceId": "evid_2",
+        "eventType": "operation_completed",
+        "timestamp": "2026-05-02T10:01:00.000Z",
+        "state": "completed",
+        "previousState": "running"
+      }
+    ]
+  },
+  "evidences": [
+    {
+      "evidenceId": "evid_1",
+      "operationType": "recovery",
+      "operationId": "op_xxx",
+      "eventType": "operation_created",
+      "timestamp": "2026-05-02T10:00:00.000Z",
+      "state": "pending",
+      "previousState": null,
+      "parameterDigest": "abc123...",
+      "resultDigest": null,
+      "errorDigest": null,
+      "prevHash": "00000000...",
+      "currentHash": "ffffffff..."
+    }
+  ]
+}
+```
+
+#### 日志列表响应（简化）
+
+**`GET /api/evidence/logs`** 返回简化的日志条目：
+
+```json
+{
+  "ok": true,
+  "logs": [
+    {
+      "evidenceId": "evid_xxx",
+      "operationType": "recovery",
+      "operationId": "op_xxx",
+      "eventType": "operation_completed",
+      "timestamp": "2026-05-02T10:01:00.000Z",
+      "state": "completed",
+      "previousState": "running"
+    }
+  ],
+  "total": 150,
+  "limit": 100,
+  "offset": 0
+}
+```
+
+#### 回放日志响应（简化）
+
+**`POST /api/evidence/replay/:operationId`** 成功时返回简化的回放日志：
+
+```json
+{
+  "ok": true,
+  "operationId": "op_xxx",
+  "operationType": "recovery",
+  "dryRun": true,
+  "finalState": "completed",
+  "eventCount": 3,
+  "replayLog": [
+    {
+      "step": 1,
+      "evidenceId": "evid_1",
+      "eventType": "operation_created",
+      "targetState": "pending",
+      "previousState": null
+    },
+    {
+      "step": 2,
+      "evidenceId": "evid_2",
+      "eventType": "operation_started",
+      "targetState": "running",
+      "previousState": "pending"
+    },
+    {
+      "step": 3,
+      "evidenceId": "evid_3",
+      "eventType": "operation_completed",
+      "targetState": "completed",
+      "previousState": "running"
+    }
+  ],
+  "message": "Dry run completed - no actual changes made"
+}
+```
+
+### 业务摘要按操作类型整理
+
+证据记录中的 `businessSummary` 现在按操作类型进行分类整理：
+
+#### Recovery 操作
+
+```json
+{
+  "operationType": "recovery",
+  "dryRun": true,
+  "autoRollbackOnFailure": true,
+  "maxRetries": 0,
+  "retries": 0,
+  "timeoutMs": 300000,
+  "concurrencyKey": "recovery",
+  "maxConcurrency": 1,
+  "progress": { ... },
+  "createdAt": "2026-05-02T10:00:00.000Z",
+  "startedAt": "2026-05-02T10:00:01.000Z",
+  "completedAt": "2026-05-02T10:00:30.000Z",
+  "failedAt": null,
+  "operationSpecific": {
+    "recovery": {
+      "createBackup": true,
+      "quarantineCorrupted": true,
+      "enableTransaction": true,
+      "logFilePath": null,
+      "trackedResources": ["sessions", "events_log", "leaderboard"]
+    }
+  }
+}
+```
+
+#### Import 操作
+
+```json
+{
+  "operationType": "import",
+  "dryRun": false,
+  "autoRollbackOnFailure": true,
+  "maxRetries": 1,
+  "retries": 0,
+  "timeoutMs": 600000,
+  "concurrencyKey": "import",
+  "maxConcurrency": 1,
+  "progress": { ... },
+  "createdAt": "2026-05-02T10:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "failedAt": null,
+  "operationSpecific": {
+    "import": {
+      "mergeStrategy": "skip_existing",
+      "skipExisting": false,
+      "overwriteExisting": false,
+      "validateBeforeImport": true,
+      "targetSessionIds": null,
+      "importSource": null,
+      "trackedResources": ["sessions", "events_log", "leaderboard"]
+    }
+  }
+}
+```
+
+#### Export 操作
+
+```json
+{
+  "operationType": "export",
+  "dryRun": false,
+  "autoRollbackOnFailure": false,
+  "maxRetries": 1,
+  "retries": 0,
+  "timeoutMs": 300000,
+  "concurrencyKey": "export",
+  "maxConcurrency": 1,
+  "progress": { ... },
+  "createdAt": "2026-05-02T10:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "failedAt": null,
+  "operationSpecific": {
+    "export": {
+      "exportFormat": "json",
+      "includeSessions": true,
+      "includeEvents": true,
+      "includeLeaderboard": true,
+      "targetSessionIds": null,
+      "compressionEnabled": false,
+      "exportDestination": null
+    }
+  }
+}
+```
+
+#### Restore 操作
+
+```json
+{
+  "operationType": "restore",
+  "dryRun": false,
+  "autoRollbackOnFailure": true,
+  "maxRetries": 1,
+  "retries": 0,
+  "timeoutMs": 300000,
+  "concurrencyKey": "restore",
+  "maxConcurrency": 1,
+  "progress": { ... },
+  "createdAt": "2026-05-02T10:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "failedAt": null,
+  "operationSpecific": {
+    "restore": {
+      "backupId": null,
+      "restorePoint": null,
+      "includeSessions": true,
+      "includeEvents": true,
+      "includeLeaderboard": true,
+      "createBackupBeforeRestore": true
+    }
+  }
+}
+```
+
+#### Delete 操作
+
+```json
+{
+  "operationType": "delete",
+  "dryRun": true,
+  "autoRollbackOnFailure": false,
+  "maxRetries": 1,
+  "retries": 0,
+  "timeoutMs": 60000,
+  "concurrencyKey": "delete",
+  "maxConcurrency": 1,
+  "progress": { ... },
+  "createdAt": "2026-05-02T10:00:00.000Z",
+  "startedAt": null,
+  "completedAt": null,
+  "failedAt": null,
+  "operationSpecific": {
+    "delete": {
+      "deleteType": "session",
+      "targetSessionIds": null,
+      "deleteAll": false,
+      "includeBackup": false,
+      "createBackupBeforeDelete": true,
+      "affectedResources": null
+    }
+  }
+}
+```

@@ -36,8 +36,152 @@ const HIGH_RISK_OPERATIONS = [
   "export"
 ];
 
+const EVIDENCE_ERROR_TYPES = {
+  CHAIN_NOT_FOUND: "chain_not_found",
+  VALIDATION_FAILED: "validation_failed",
+  INVALID_STATE_TRANSITION: "invalid_state_transition",
+  HASH_TAMPERED: "hash_tampered",
+  TIMESTAMP_OUT_OF_ORDER: "timestamp_out_of_order",
+  CHAIN_BROKEN: "chain_broken",
+  EVIDENCE_NOT_FOUND: "evidence_not_found",
+  EVIDENCE_DISABLED: "evidence_disabled",
+  INVALID_PARAMETERS: "invalid_parameters"
+};
+
+const EVIDENCE_ERROR_MESSAGES = {
+  [EVIDENCE_ERROR_TYPES.CHAIN_NOT_FOUND]: "Operation chain not found",
+  [EVIDENCE_ERROR_TYPES.VALIDATION_FAILED]: "Evidence chain validation failed",
+  [EVIDENCE_ERROR_TYPES.INVALID_STATE_TRANSITION]: "Invalid state transition detected",
+  [EVIDENCE_ERROR_TYPES.HASH_TAMPERED]: "Evidence hash has been tampered",
+  [EVIDENCE_ERROR_TYPES.TIMESTAMP_OUT_OF_ORDER]: "Event timestamp is out of order",
+  [EVIDENCE_ERROR_TYPES.CHAIN_BROKEN]: "Hash chain is broken",
+  [EVIDENCE_ERROR_TYPES.EVIDENCE_NOT_FOUND]: "Evidence not found",
+  [EVIDENCE_ERROR_TYPES.EVIDENCE_DISABLED]: "Evidence chain is disabled",
+  [EVIDENCE_ERROR_TYPES.INVALID_PARAMETERS]: "Invalid parameters"
+};
+
 let lastEvidenceHash = null;
 let lastEvidenceTimestamp = null;
+
+function simplifyChain(chain) {
+  if (!chain) return null;
+  return {
+    operationId: chain.operationId,
+    operationType: chain.operationType,
+    createdAt: chain.createdAt,
+    updatedAt: chain.updatedAt,
+    lastEvidenceId: chain.lastEvidenceId,
+    lastHash: chain.lastHash,
+    eventCount: chain.events ? chain.events.length : 0
+  };
+}
+
+function simplifyChainWithEvents(chain) {
+  if (!chain) return null;
+  return {
+    operationId: chain.operationId,
+    operationType: chain.operationType,
+    createdAt: chain.createdAt,
+    updatedAt: chain.updatedAt,
+    lastEvidenceId: chain.lastEvidenceId,
+    lastHash: chain.lastHash,
+    events: (chain.events || []).map(simplifyEvent)
+  };
+}
+
+function simplifyEvent(event) {
+  if (!event) return null;
+  return {
+    evidenceId: event.evidenceId,
+    eventType: event.eventType,
+    timestamp: event.timestamp,
+    state: event.state,
+    previousState: event.previousState
+  };
+}
+
+function simplifyEvidence(evidence) {
+  if (!evidence) return null;
+  return {
+    evidenceId: evidence.evidenceId,
+    operationType: evidence.operationType,
+    operationId: evidence.operationId,
+    eventType: evidence.eventType,
+    timestamp: evidence.timestamp,
+    state: evidence.state,
+    previousState: evidence.previousState,
+    parameterDigest: evidence.parameterDigest,
+    resultDigest: evidence.resultDigest,
+    errorDigest: evidence.errorDigest,
+    prevHash: evidence.prevHash,
+    currentHash: evidence.currentHash
+  };
+}
+
+function simplifyEvidenceWithDetails(evidence) {
+  if (!evidence) return null;
+  return {
+    evidenceId: evidence.evidenceId,
+    operationType: evidence.operationType,
+    operationId: evidence.operationId,
+    eventType: evidence.eventType,
+    timestamp: evidence.timestamp,
+    state: evidence.state,
+    previousState: evidence.previousState,
+    parameterDigest: evidence.parameterDigest,
+    resultDigest: evidence.resultDigest,
+    errorDigest: evidence.errorDigest,
+    prevHash: evidence.prevHash,
+    currentHash: evidence.currentHash,
+    parameters: evidence.parameters,
+    result: evidence.result,
+    error: evidence.error ? { message: evidence.error.message } : undefined,
+    metadata: evidence.metadata
+  };
+}
+
+function simplifyValidationIssue(issue) {
+  if (!issue) return null;
+  return {
+    type: issue.type,
+    severity: issue.severity,
+    evidenceId: issue.evidenceId,
+    message: issue.message
+  };
+}
+
+function simplifyReplayLogEntry(entry) {
+  if (!entry) return null;
+  return {
+    step: entry.step,
+    evidenceId: entry.evidenceId,
+    eventType: entry.eventType,
+    targetState: entry.targetState,
+    previousState: entry.previousState
+  };
+}
+
+function simplifyLogEntry(entry) {
+  if (!entry) return null;
+  return {
+    evidenceId: entry.evidenceId,
+    operationType: entry.operationType,
+    operationId: entry.operationId,
+    eventType: entry.eventType,
+    timestamp: entry.timestamp,
+    state: entry.state,
+    previousState: entry.previousState
+  };
+}
+
+function createErrorResult(errorType, context = {}) {
+  return {
+    success: false,
+    errorType,
+    errorMessage: EVIDENCE_ERROR_MESSAGES[errorType] || errorType,
+    context
+  };
+}
 
 function generateEvidenceId() {
   return `evid_${Date.now()}_${createId("ev").slice(-8)}`;
@@ -530,7 +674,13 @@ async function replayOperationFromEvidence(operationId, options = {}) {
 
   const result = await getEvidenceByOperationId(operationId);
   if (!result.success) {
-    return result;
+    return {
+      success: false,
+      errorType: EVIDENCE_ERROR_TYPES.CHAIN_NOT_FOUND,
+      errorMessage: result.error || "Operation chain not found",
+      operationId,
+      context: { operationId }
+    };
   }
 
   const evidences = result.evidences;
@@ -549,13 +699,42 @@ async function replayOperationFromEvidence(operationId, options = {}) {
   if (validateChain) {
     const validation = await validateEvidenceChainFull(operationId);
     if (!validation.valid) {
+      const primaryIssue = validation.issues.find(i => i.severity === "error");
+      let errorType = EVIDENCE_ERROR_TYPES.VALIDATION_FAILED;
+      
+      if (primaryIssue) {
+        switch (primaryIssue.type) {
+          case "hash_tampered":
+            errorType = EVIDENCE_ERROR_TYPES.HASH_TAMPERED;
+            break;
+          case "chain_broken":
+            errorType = EVIDENCE_ERROR_TYPES.CHAIN_BROKEN;
+            break;
+          case "timestamp_out_of_order":
+            errorType = EVIDENCE_ERROR_TYPES.TIMESTAMP_OUT_OF_ORDER;
+            break;
+          case "invalid_state_transition":
+            errorType = EVIDENCE_ERROR_TYPES.INVALID_STATE_TRANSITION;
+            break;
+        }
+      }
+
       return {
         success: false,
+        errorType,
+        errorMessage: primaryIssue ? primaryIssue.message : "Evidence chain validation failed",
         operationId,
         operationType: result.operationType,
-        error: "Evidence chain validation failed",
         validationIssues: validation.issues,
-        canReplay: false
+        canReplay: false,
+        context: {
+          totalIssues: validation.issues.length,
+          primaryIssue: primaryIssue ? {
+            type: primaryIssue.type,
+            severity: primaryIssue.severity,
+            evidenceId: primaryIssue.evidenceId
+          } : null
+        }
       };
     }
   }
@@ -705,20 +884,63 @@ async function replayOperationFromEvidence(operationId, options = {}) {
 
   const hasErrors = validationIssues.some(i => i.severity === "error");
 
+  if (hasErrors) {
+    const primaryIssue = validationIssues.find(i => i.severity === "error");
+    let errorType = EVIDENCE_ERROR_TYPES.VALIDATION_FAILED;
+    
+    if (primaryIssue) {
+      switch (primaryIssue.type) {
+        case "hash_tampered":
+          errorType = EVIDENCE_ERROR_TYPES.HASH_TAMPERED;
+          break;
+        case "chain_broken":
+          errorType = EVIDENCE_ERROR_TYPES.CHAIN_BROKEN;
+          break;
+        case "timestamp_out_of_order":
+          errorType = EVIDENCE_ERROR_TYPES.TIMESTAMP_OUT_OF_ORDER;
+          break;
+        case "invalid_state_transition":
+          errorType = EVIDENCE_ERROR_TYPES.INVALID_STATE_TRANSITION;
+          break;
+      }
+    }
+
+    return {
+      success: false,
+      errorType,
+      errorMessage: primaryIssue ? primaryIssue.message : "Replay validation failed - found issues in evidence chain",
+      operationId,
+      operationType: result.operationType,
+      dryRun,
+      finalState: currentState,
+      eventCount: evidences.length,
+      canReplay: false,
+      validationIssues,
+      stateReconstruction,
+      context: {
+        totalIssues: validationIssues.length,
+        primaryIssue: primaryIssue ? {
+          type: primaryIssue.type,
+          severity: primaryIssue.severity,
+          evidenceId: primaryIssue.evidenceId,
+          step: primaryIssue.step
+        } : null
+      }
+    };
+  }
+
   return {
-    success: !hasErrors,
+    success: true,
     operationId,
     operationType: result.operationType,
     dryRun,
     finalState: currentState,
     eventCount: evidences.length,
     replayLog,
-    canReplay: !hasErrors,
-    validationIssues,
+    canReplay: true,
+    validationIssues: [],
     stateReconstruction,
-    message: hasErrors
-      ? "Replay validation failed - found issues in evidence chain"
-      : (dryRun ? "Dry run completed - no actual changes made" : "Replay completed")
+    message: dryRun ? "Dry run completed - no actual changes made" : "Replay completed"
   };
 }
 
@@ -761,6 +983,8 @@ module.exports = {
   EVIDENCE_TYPES,
   HIGH_RISK_OPERATIONS,
   VALID_STATE_TRANSITIONS,
+  EVIDENCE_ERROR_TYPES,
+  EVIDENCE_ERROR_MESSAGES,
   validateStateTransition,
   generateEvidenceId,
   calculateHash,
@@ -780,5 +1004,14 @@ module.exports = {
   exportEvidenceChain,
   replayOperationFromEvidence,
   getEvidenceState,
-  verifyParameterConsistency
+  verifyParameterConsistency,
+  simplifyChain,
+  simplifyChainWithEvents,
+  simplifyEvent,
+  simplifyEvidence,
+  simplifyEvidenceWithDetails,
+  simplifyValidationIssue,
+  simplifyReplayLogEntry,
+  simplifyLogEntry,
+  createErrorResult
 };

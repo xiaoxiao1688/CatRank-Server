@@ -736,3 +736,297 @@ test("evidence chain: listLogsSchema validates pagination parameters", async () 
     listLogsSchema.parse({ limit: "abc" });
   }, "Should reject non-numeric limit");
 });
+
+test("evidence chain: simplifyChain simplifies chain response", async () => {
+  const { simplifyChain } = require("../src/services/evidence-chain-service");
+
+  const fullChain = {
+    operationId: "op_test_1",
+    operationType: "recovery",
+    createdAt: "2026-05-02T10:00:00.000Z",
+    updatedAt: "2026-05-02T10:01:00.000Z",
+    lastEvidenceId: "evid_123_abcdef",
+    lastHash: "abc123def456",
+    events: [
+      { evidenceId: "evid_123", eventType: "operation_created", timestamp: "2026-05-02T10:00:00.000Z", state: "pending", previousState: null, currentHash: "abc", prevHash: "000" },
+      { evidenceId: "evid_456", eventType: "operation_completed", timestamp: "2026-05-02T10:01:00.000Z", state: "completed", previousState: "running", currentHash: "def", prevHash: "abc" }
+    ]
+  };
+
+  const simplified = simplifyChain(fullChain);
+
+  assert.strictEqual(simplified.operationId, "op_test_1", "Should have operationId");
+  assert.strictEqual(simplified.operationType, "recovery", "Should have operationType");
+  assert.strictEqual(simplified.createdAt, "2026-05-02T10:00:00.000Z", "Should have createdAt");
+  assert.strictEqual(simplified.updatedAt, "2026-05-02T10:01:00.000Z", "Should have updatedAt");
+  assert.strictEqual(simplified.lastEvidenceId, "evid_123_abcdef", "Should have lastEvidenceId");
+  assert.strictEqual(simplified.lastHash, "abc123def456", "Should have lastHash");
+  assert.strictEqual(simplified.eventCount, 2, "Should have eventCount");
+  assert.strictEqual(simplified.events, undefined, "Should not have events");
+});
+
+test("evidence chain: simplifyChainWithEvents includes simplified events", async () => {
+  const { simplifyChainWithEvents } = require("../src/services/evidence-chain-service");
+
+  const fullChain = {
+    operationId: "op_test_2",
+    operationType: "import",
+    createdAt: "2026-05-02T10:00:00.000Z",
+    updatedAt: "2026-05-02T10:01:00.000Z",
+    lastEvidenceId: "evid_123",
+    lastHash: "abc123",
+    events: [
+      { evidenceId: "evid_123", eventType: "operation_created", timestamp: "2026-05-02T10:00:00.000Z", state: "pending", previousState: null, currentHash: "abc", prevHash: "000" },
+      { evidenceId: "evid_456", eventType: "operation_completed", timestamp: "2026-05-02T10:01:00.000Z", state: "completed", previousState: "running", currentHash: "def", prevHash: "abc" }
+    ]
+  };
+
+  const simplified = simplifyChainWithEvents(fullChain);
+
+  assert.strictEqual(simplified.operationId, "op_test_2", "Should have operationId");
+  assert.strictEqual(simplified.events.length, 2, "Should have 2 events");
+  assert.strictEqual(simplified.events[0].evidenceId, "evid_123", "First event should have evidenceId");
+  assert.strictEqual(simplified.events[0].eventType, "operation_created", "First event should have eventType");
+  assert.strictEqual(simplified.events[0].state, "pending", "First event should have state");
+  assert.strictEqual(simplified.events[0].currentHash, undefined, "Should not have currentHash in simplified event");
+  assert.strictEqual(simplified.events[0].prevHash, undefined, "Should not have prevHash in simplified event");
+});
+
+test("evidence chain: simplifyEvidence simplifies evidence response", async () => {
+  const { simplifyEvidence } = require("../src/services/evidence-chain-service");
+
+  const fullEvidence = {
+    evidenceId: "evid_12345678",
+    operationType: "export",
+    operationId: "op_export_001",
+    eventType: "operation_completed",
+    timestamp: "2026-05-02T10:00:00.000Z",
+    state: "completed",
+    previousState: "running",
+    parameterDigest: "abc123def456",
+    resultDigest: "def456abc123",
+    errorDigest: null,
+    prevHash: "0000000000000000",
+    currentHash: "ffffffffffffffff",
+    parameters: { dryRun: false, targetFormat: "json" },
+    result: { success: true, exportedCount: 100 },
+    error: null,
+    metadata: { extra: "data" }
+  };
+
+  const simplified = simplifyEvidence(fullEvidence);
+
+  assert.strictEqual(simplified.evidenceId, "evid_12345678", "Should have evidenceId");
+  assert.strictEqual(simplified.operationType, "export", "Should have operationType");
+  assert.strictEqual(simplified.operationId, "op_export_001", "Should have operationId");
+  assert.strictEqual(simplified.eventType, "operation_completed", "Should have eventType");
+  assert.strictEqual(simplified.timestamp, "2026-05-02T10:00:00.000Z", "Should have timestamp");
+  assert.strictEqual(simplified.state, "completed", "Should have state");
+  assert.strictEqual(simplified.previousState, "running", "Should have previousState");
+  assert.strictEqual(simplified.parameterDigest, "abc123def456", "Should have parameterDigest");
+  assert.strictEqual(simplified.resultDigest, "def456abc123", "Should have resultDigest");
+  assert.strictEqual(simplified.errorDigest, null, "Should have errorDigest");
+  assert.strictEqual(simplified.prevHash, "0000000000000000", "Should have prevHash");
+  assert.strictEqual(simplified.currentHash, "ffffffffffffffff", "Should have currentHash");
+  assert.strictEqual(simplified.parameters, undefined, "Should not have parameters");
+  assert.strictEqual(simplified.result, undefined, "Should not have result");
+  assert.strictEqual(simplified.error, undefined, "Should not have error");
+  assert.strictEqual(simplified.metadata, undefined, "Should not have metadata");
+});
+
+test("evidence chain: simplifyEvidenceWithDetails includes details", async () => {
+  const { simplifyEvidenceWithDetails } = require("../src/services/evidence-chain-service");
+
+  const fullEvidence = {
+    evidenceId: "evid_12345678",
+    operationType: "export",
+    operationId: "op_export_001",
+    eventType: "operation_completed",
+    timestamp: "2026-05-02T10:00:00.000Z",
+    state: "completed",
+    previousState: "running",
+    parameterDigest: "abc123def456",
+    resultDigest: "def456abc123",
+    errorDigest: null,
+    prevHash: "0000000000000000",
+    currentHash: "ffffffffffffffff",
+    parameters: { dryRun: false, targetFormat: "json" },
+    result: { success: true, exportedCount: 100 },
+    error: null,
+    metadata: { extra: "data" }
+  };
+
+  const simplified = simplifyEvidenceWithDetails(fullEvidence);
+
+  assert.strictEqual(simplified.evidenceId, "evid_12345678", "Should have evidenceId");
+  assert.strictEqual(simplified.parameters.dryRun, false, "Should have parameters");
+  assert.strictEqual(simplified.result.success, true, "Should have result");
+  assert.strictEqual(simplified.metadata.extra, "data", "Should have metadata");
+});
+
+test("evidence chain: simplifyLogEntry simplifies log entry", async () => {
+  const { simplifyLogEntry } = require("../src/services/evidence-chain-service");
+
+  const fullEntry = {
+    evidenceId: "evid_12345678",
+    operationType: "recovery",
+    operationId: "op_recovery_001",
+    eventType: "operation_started",
+    timestamp: "2026-05-02T10:00:00.000Z",
+    state: "running",
+    previousState: "pending",
+    parameterDigest: "abc123",
+    prevHash: "000",
+    currentHash: "fff",
+    parameters: { test: "value" }
+  };
+
+  const simplified = simplifyLogEntry(fullEntry);
+
+  assert.strictEqual(simplified.evidenceId, "evid_12345678", "Should have evidenceId");
+  assert.strictEqual(simplified.operationType, "recovery", "Should have operationType");
+  assert.strictEqual(simplified.operationId, "op_recovery_001", "Should have operationId");
+  assert.strictEqual(simplified.eventType, "operation_started", "Should have eventType");
+  assert.strictEqual(simplified.timestamp, "2026-05-02T10:00:00.000Z", "Should have timestamp");
+  assert.strictEqual(simplified.state, "running", "Should have state");
+  assert.strictEqual(simplified.previousState, "pending", "Should have previousState");
+  assert.strictEqual(simplified.parameterDigest, undefined, "Should not have parameterDigest");
+  assert.strictEqual(simplified.prevHash, undefined, "Should not have prevHash");
+  assert.strictEqual(simplified.currentHash, undefined, "Should not have currentHash");
+});
+
+test("evidence chain: EVIDENCE_ERROR_TYPES defines all error types", async () => {
+  const { EVIDENCE_ERROR_TYPES, EVIDENCE_ERROR_MESSAGES } = require("../src/services/evidence-chain-service");
+
+  assert.ok(EVIDENCE_ERROR_TYPES.CHAIN_NOT_FOUND, "Should have CHAIN_NOT_FOUND");
+  assert.ok(EVIDENCE_ERROR_TYPES.VALIDATION_FAILED, "Should have VALIDATION_FAILED");
+  assert.ok(EVIDENCE_ERROR_TYPES.INVALID_STATE_TRANSITION, "Should have INVALID_STATE_TRANSITION");
+  assert.ok(EVIDENCE_ERROR_TYPES.HASH_TAMPERED, "Should have HASH_TAMPERED");
+  assert.ok(EVIDENCE_ERROR_TYPES.TIMESTAMP_OUT_OF_ORDER, "Should have TIMESTAMP_OUT_OF_ORDER");
+  assert.ok(EVIDENCE_ERROR_TYPES.CHAIN_BROKEN, "Should have CHAIN_BROKEN");
+  assert.ok(EVIDENCE_ERROR_TYPES.EVIDENCE_NOT_FOUND, "Should have EVIDENCE_NOT_FOUND");
+  assert.ok(EVIDENCE_ERROR_TYPES.EVIDENCE_DISABLED, "Should have EVIDENCE_DISABLED");
+  assert.ok(EVIDENCE_ERROR_TYPES.INVALID_PARAMETERS, "Should have INVALID_PARAMETERS");
+
+  assert.ok(EVIDENCE_ERROR_MESSAGES[EVIDENCE_ERROR_TYPES.CHAIN_NOT_FOUND], "Should have message for CHAIN_NOT_FOUND");
+  assert.ok(EVIDENCE_ERROR_MESSAGES[EVIDENCE_ERROR_TYPES.VALIDATION_FAILED], "Should have message for VALIDATION_FAILED");
+});
+
+test("evidence chain: createErrorResult creates structured error", async () => {
+  const { createErrorResult, EVIDENCE_ERROR_TYPES } = require("../src/services/evidence-chain-service");
+
+  const result = createErrorResult(EVIDENCE_ERROR_TYPES.HASH_TAMPERED, { evidenceId: "evid_123", step: 2 });
+
+  assert.strictEqual(result.success, false, "Should have success: false");
+  assert.strictEqual(result.errorType, EVIDENCE_ERROR_TYPES.HASH_TAMPERED, "Should have correct errorType");
+  assert.strictEqual(result.errorMessage, "Evidence hash has been tampered", "Should have correct errorMessage");
+  assert.strictEqual(result.context.evidenceId, "evid_123", "Should have context.evidenceId");
+  assert.strictEqual(result.context.step, 2, "Should have context.step");
+});
+
+test("evidence chain: replayOperationFromEvidence returns detailed error types", async () => {
+  const { createEvidence, replayOperationFromEvidence, EVIDENCE_ERROR_TYPES, getLastEvidenceHash } = require("../src/services/evidence-chain-service");
+
+  const operationId = "op_error_types_test";
+
+  const evidence1 = await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_created",
+    state: "pending",
+    previousState: null,
+    parameters: { step: 1 }
+  });
+
+  const lastHash = await getLastEvidenceHash();
+  const evidence2 = await createEvidence({
+    operationType: "recovery",
+    operationId,
+    eventType: "operation_completed",
+    state: "completed",
+    previousState: "pending",
+    parameters: { step: 2 },
+    prevHash: "tampered_hash"
+  });
+
+  const result = await replayOperationFromEvidence(operationId, { dryRun: true });
+
+  assert.strictEqual(result.success, false, "Replay should fail");
+  assert.ok(result.errorType, "Should have errorType");
+  assert.ok(result.errorMessage, "Should have errorMessage");
+  assert.ok(result.context, "Should have context");
+  assert.strictEqual(result.canReplay, false, "Should have canReplay: false");
+});
+
+test("evidence chain: replayOperationFromEvidence returns chain_not_found for non-existent operation", async () => {
+  const { replayOperationFromEvidence, EVIDENCE_ERROR_TYPES } = require("../src/services/evidence-chain-service");
+
+  const result = await replayOperationFromEvidence("non_existent_op_12345", { dryRun: true });
+
+  assert.strictEqual(result.success, false, "Replay should fail");
+  assert.strictEqual(result.errorType, EVIDENCE_ERROR_TYPES.CHAIN_NOT_FOUND, "Error type should be chain_not_found");
+  assert.ok(result.errorMessage, "Should have errorMessage");
+  assert.strictEqual(result.context.operationId, "non_existent_op_12345", "Should have context.operationId");
+});
+
+test("evidence chain: simplifyReplayLogEntry simplifies replay log entry", async () => {
+  const { simplifyReplayLogEntry } = require("../src/services/evidence-chain-service");
+
+  const fullEntry = {
+    step: 1,
+    evidenceId: "evid_12345678",
+    eventType: "operation_created",
+    timestamp: "2026-05-02T10:00:00.000Z",
+    previousState: null,
+    targetState: "pending",
+    parameters: { dryRun: true },
+    parameterDigest: "abc123",
+    result: null,
+    resultDigest: null,
+    validation: { checks: [] }
+  };
+
+  const simplified = simplifyReplayLogEntry(fullEntry);
+
+  assert.strictEqual(simplified.step, 1, "Should have step");
+  assert.strictEqual(simplified.evidenceId, "evid_12345678", "Should have evidenceId");
+  assert.strictEqual(simplified.eventType, "operation_created", "Should have eventType");
+  assert.strictEqual(simplified.targetState, "pending", "Should have targetState");
+  assert.strictEqual(simplified.previousState, null, "Should have previousState");
+  assert.strictEqual(simplified.timestamp, undefined, "Should not have timestamp");
+  assert.strictEqual(simplified.parameters, undefined, "Should not have parameters");
+  assert.strictEqual(simplified.parameterDigest, undefined, "Should not have parameterDigest");
+  assert.strictEqual(simplified.result, undefined, "Should not have result");
+  assert.strictEqual(simplified.resultDigest, undefined, "Should not have resultDigest");
+  assert.strictEqual(simplified.validation, undefined, "Should not have validation");
+});
+
+test("evidence chain: simplifyValidationIssue simplifies validation issue", async () => {
+  const { simplifyValidationIssue } = require("../src/services/evidence-chain-service");
+
+  const fullIssue = {
+    type: "hash_tampered",
+    severity: "error",
+    eventIndex: 2,
+    evidenceId: "evid_12345678",
+    message: "Evidence hash has been tampered",
+    expectedHash: "abc123def456",
+    actualHash: "tampered_hash_123",
+    from: "pending",
+    to: "completed",
+    step: 2
+  };
+
+  const simplified = simplifyValidationIssue(fullIssue);
+
+  assert.strictEqual(simplified.type, "hash_tampered", "Should have type");
+  assert.strictEqual(simplified.severity, "error", "Should have severity");
+  assert.strictEqual(simplified.evidenceId, "evid_12345678", "Should have evidenceId");
+  assert.strictEqual(simplified.message, "Evidence hash has been tampered", "Should have message");
+  assert.strictEqual(simplified.expectedHash, undefined, "Should not have expectedHash");
+  assert.strictEqual(simplified.actualHash, undefined, "Should not have actualHash");
+  assert.strictEqual(simplified.eventIndex, undefined, "Should not have eventIndex");
+  assert.strictEqual(simplified.step, undefined, "Should not have step");
+  assert.strictEqual(simplified.from, undefined, "Should not have from");
+  assert.strictEqual(simplified.to, undefined, "Should not have to");
+});
